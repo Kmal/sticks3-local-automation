@@ -329,6 +329,10 @@ The focused status UI button/input architecture review is recorded in `docs/stat
 
 ## Development checks
 
+The firmware targets ESP-IDF v6.1 and ESP32-S3. Activate an ESP-IDF v6.1
+environment before configuring or building the project, then select the target
+with `idf.py set-target esp32s3`.
+
 Run these checks after changes when the local environment supports them:
 
 ```sh

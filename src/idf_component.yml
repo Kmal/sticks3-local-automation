@@ -1,4 +1,6 @@
 dependencies:
+  idf:
+    version: ">=6.1,<6.2"
   espressif/usb_device_uac:
     version: "1.2.3"
     rules:
