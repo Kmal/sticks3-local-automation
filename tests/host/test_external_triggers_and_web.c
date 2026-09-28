@@ -15,6 +15,21 @@ static trigger_fact_t s_last_fact;
 static size_t s_fact_count;
 static size_t s_config_changed_count;
 static automation_config_t s_last_config_changed;
+static size_t s_runtime_lock_count;
+static size_t s_runtime_unlock_count;
+
+static bool capture_runtime_lock(void *ctx)
+{
+    (void)ctx;
+    s_runtime_lock_count++;
+    return true;
+}
+
+static void capture_runtime_unlock(void *ctx)
+{
+    (void)ctx;
+    s_runtime_unlock_count++;
+}
 
 static bool capture_fact(const trigger_fact_t *fact, void *ctx)
 {
@@ -70,10 +85,15 @@ static void test_rule_web_status(void)
     ASSERT_TRUE(rule_runtime_init(&runtime, &config));
     ASSERT_TRUE(rule_config_store_open(&store));
     ASSERT_TRUE(rule_web_start(&web, &runtime, &store));
+    rule_web_set_runtime_lock(&web, capture_runtime_lock, capture_runtime_unlock, NULL);
+    s_runtime_lock_count = 0;
+    s_runtime_unlock_count = 0;
     s_config_changed_count = 0;
     rule_web_set_config_changed_callback(&web, capture_config_changed, NULL);
     char json[16384];
     ASSERT_TRUE(rule_web_get_status_json(&web, json, sizeof(json)));
+    ASSERT_EQ_U32(1, s_runtime_lock_count);
+    ASSERT_EQ_U32(1, s_runtime_unlock_count);
     ASSERT_TRUE(strstr(json, "http_network_ready") != NULL);
     ASSERT_TRUE(strstr(json, "\"wifi\"") != NULL);
     ASSERT_TRUE(strstr(json, "\"sound\"") != NULL);
@@ -100,6 +120,7 @@ static void test_rule_web_status(void)
     ASSERT_TRUE(strstr(json, "id=\"wifi_password\" type=\"password\" maxlength=\"63\" autocomplete=\"off\" autocapitalize=\"none\"") != NULL);
     ASSERT_TRUE(strstr(json, "id=\"ap_ssid\" maxlength=\"32\" autocomplete=\"off\" autocapitalize=\"none\"") != NULL);
     ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_GET, "/api/time", NULL, json, sizeof(json)));
+    ASSERT_EQ_U32(1, s_runtime_lock_count);
     ASSERT_TRUE(strstr(json, "\"timezone\":\"UTC\"") != NULL);
     ASSERT_TRUE(strstr(json, "\"time_24h\"") != NULL);
     ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/time", "{\"timezone\":\"UTC0\"}", json, sizeof(json)));
@@ -166,6 +187,8 @@ static void test_rule_web_status(void)
     ASSERT_TRUE(strstr(json, "pulse_count") != NULL);
     ASSERT_TRUE(strstr(json, "speaker_tone") != NULL);
     ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_GET, "/api/config", NULL, json, sizeof(json)));
+    ASSERT_TRUE(s_runtime_lock_count > 1);
+    ASSERT_EQ_U32(s_runtime_lock_count, s_runtime_unlock_count);
     ASSERT_TRUE(strstr(json, "threshold_kind") != NULL);
     char exported[16384];
     snprintf(exported, sizeof(exported), "%s", json);

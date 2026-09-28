@@ -75,7 +75,7 @@ static bool app_sound_level_capture_needed(const automation_config_t *config);
 static bool app_sound_level_status_json(char *out, size_t out_len, void *ctx);
 static void app_sound_level_release_audio(void);
 static void app_sound_level_release_if_stopped(void);
-static void app_sound_level_stop(void);
+static bool app_sound_level_stop(void);
 static void app_sound_level_sync(const automation_config_t *config);
 #endif
 
@@ -158,9 +158,14 @@ static action_result_t app_send_speaker_rule_action(const rule_event_t *event, v
     /* Official StickS3 examples stop the microphone before speaker playback and
      * restart it afterwards.  Keep the same single-owner I2S policy here so the
      * speaker action never attempts to share the ES8311/I2S path with capture. */
-    app_sound_level_stop();
+    const bool capture_stopped = app_sound_level_stop();
+#else
+    const bool capture_stopped = true;
 #endif
-    if (!action_speaker_send_event(event)) {
+    if (!capture_stopped) {
+        ESP_LOGE(TAG, "speaker action rejected because microphone capture did not stop");
+        result.code = ACTION_RESULT_UNSUPPORTED;
+    } else if (!action_speaker_send_event(event)) {
         result.code = ACTION_RESULT_UNSUPPORTED;
     }
 #if CONFIG_APP_SOUND_LEVEL_TRIGGERS
@@ -392,10 +397,10 @@ static void app_sound_level_release_if_stopped(void)
     ESP_LOGI(TAG, "sound triggers: capture resources released");
 }
 
-static void app_sound_level_stop(void)
+static bool app_sound_level_stop(void)
 {
     if (s_sound_level_service == NULL) {
-        return;
+        return true;
     }
     if (s_sound_level_ready) {
         sound_level_service_request_stop(s_sound_level_service);
@@ -406,6 +411,7 @@ static void app_sound_level_stop(void)
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     app_sound_level_release_if_stopped();
+    return s_sound_level_service == NULL;
 }
 
 /* Start microphone capture only while at least one enabled rule consumes a sound source.
@@ -558,6 +564,20 @@ static void app_rule_web_config_changed_cb(const automation_config_t *config, vo
 #endif
 }
 
+static bool app_rule_web_runtime_lock(void *ctx)
+{
+    SemaphoreHandle_t mutex = (SemaphoreHandle_t)ctx;
+    return mutex == NULL || xSemaphoreTake(mutex, pdMS_TO_TICKS(1000)) == pdTRUE;
+}
+
+static void app_rule_web_runtime_unlock(void *ctx)
+{
+    SemaphoreHandle_t mutex = (SemaphoreHandle_t)ctx;
+    if (mutex != NULL) {
+        xSemaphoreGive(mutex);
+    }
+}
+
 /* The Web UI HTTP server owns a task, URI handler table, stack, and heap
  * buffers inside esp_http_server. Keep those resources allocated only while
  * the on-device Web UI flow has explicitly enabled the service. */
@@ -577,6 +597,8 @@ static void app_web_ui_service_changed(bool enabled, void *ctx)
     }
     if (enabled) {
         if (!s_rule_web.started && rule_web_start(&s_rule_web, &s_rule_runtime, &s_rule_store)) {
+            rule_web_set_runtime_lock(&s_rule_web, app_rule_web_runtime_lock,
+                                      app_rule_web_runtime_unlock, s_rule_mutex);
             rule_web_set_config_changed_callback(&s_rule_web, app_rule_web_config_changed_cb, NULL);
 #if CONFIG_APP_SOUND_LEVEL_TRIGGERS
             app_sound_level_demand_set_telemetry(&s_sound_level_demand, true);
