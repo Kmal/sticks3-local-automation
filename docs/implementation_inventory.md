@@ -17,7 +17,7 @@ This inventory is generated from direct source inspection of `src/**/*.c`, `src/
 | `audio_pipeline.c` | helper-only | yes | PCM capture/playback buffer helper source; not linked by the default app component. |
 | `audio_resample.c` | helper-only | yes | Audio resampling helper source; not linked by the default app component. |
 | `bmi270.c` | default | yes | BMI270 polling-only accelerometer driver and deterministic software motion thresholding used by hardware automation facts. |
-| `board_adc.c` | default | yes | ESP-IDF ADC1 oneshot allowlist for safe Grove/Hat voltage rule facts with divider scaling. |
+| `board_adc.c` | default | yes | ESP-IDF ADC1 oneshot allowlist for safe Grove/Hat voltage rule facts with calibrated millivolt conversion and fail-closed behavior when calibration is unavailable. |
 | `board_power.c` | default | yes | Board-level M5PM1 power policy, battery percent interpolation, USB/external-power-present thresholding, independent degraded VBAT/VIN/5V voltage reads with explicit USB-valid status, and status UI battery helper. |
 | `board_audio.c` | default via sound/speaker config | yes | Capture-only and playback-only audio initializer linked by sound-level trigger or speaker-action builds; `app_main()` uses capture-only for sound rules and `action_speaker.c` uses playback-only for tones. |
 | `board_audio_clock.c` | default via sound/speaker config | yes | 16 kHz/12.288 MHz/512 kHz audio clock profile helper linked by sound-level trigger or speaker-action builds. |
@@ -36,7 +36,7 @@ This inventory is generated from direct source inspection of `src/**/*.c`, `src/
 | `rule_engine.c` | default | yes | Rule condition evaluation, false-to-true firing, sustain, cooldown, action fan-out, and sequence assignment. |
 | `rule_runtime.c` | default | yes | Runtime bridge from button/GPIO/BLE/Wi-Fi/sound facts to rule engine and action dispatcher; the default sound service feeds live metrics through this existing path. |
 | `rule_types.c` | default | yes | Rule defaults, validation, source/action names, safe GPIO/capability checks, and binary config serialization. |
-| `rule_web.c` | default | yes | On-demand HTTP Web UI/API implementation for config, status, time, Wi-Fi, capabilities, test actions, GPIO, and HAT probe. |
+| `rule_web.c` | default | yes | On-demand HTTP Web UI/API implementation for config, status, time, Wi-Fi, capabilities, test actions, GPIO, and HAT probe; runtime reads and mutations use the application's rule mutex. |
 | `sound_level_service.c` | default via sound config | yes | Demand-driven capture task/service source linked by default sound-level trigger builds; it reads microphone samples, computes metrics, and feeds sound facts while enabled sound rules or Web UI telemetry demand exist. |
 | `status_lcd.c` | default | no | Optional LCD bring-up/render task path behind `CONFIG_APP_STATUS_UI_LCD`; failures are non-fatal. |
 | `status_ui.c` | default | no | Status UI task, active-low KEY1/KEY2 polling, global input queueing, focused keyboard/scan/menu/idle dispatch, launcher/menu integration, toasts, service enablement, and automation config callbacks. |

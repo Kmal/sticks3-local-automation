@@ -175,7 +175,17 @@ void rule_web_set_config_changed_callback(rule_web_t *web, rule_web_config_chang
     web->config_changed_ctx = ctx;
 }
 
-bool rule_web_get_status_json(const rule_web_t *web, char *out, size_t out_len)
+void rule_web_set_runtime_lock(rule_web_t *web, rule_web_lock_cb_t lock_cb, rule_web_unlock_cb_t unlock_cb, void *ctx)
+{
+    if (web == NULL) {
+        return;
+    }
+    web->runtime_lock_cb = lock_cb;
+    web->runtime_unlock_cb = unlock_cb;
+    web->runtime_lock_ctx = ctx;
+}
+
+static bool rule_web_get_status_json_unlocked(const rule_web_t *web, char *out, size_t out_len)
 {
     if (web == NULL || out == NULL || out_len == 0) {
         return false;
@@ -194,6 +204,28 @@ bool rule_web_get_status_json(const rule_web_t *web, char *out, size_t out_len)
                                  web->started ? "true" : "false", (int)result.code,
                                  action_http_network_ready() ? "true" : "false", wifi, sound);
     return written > 0 && (size_t)written < out_len;
+}
+
+static bool rule_web_lock_runtime(const rule_web_t *web)
+{
+    return web->runtime_lock_cb == NULL || web->runtime_lock_cb(web->runtime_lock_ctx);
+}
+
+static void rule_web_unlock_runtime(const rule_web_t *web)
+{
+    if (web->runtime_unlock_cb != NULL) {
+        web->runtime_unlock_cb(web->runtime_lock_ctx);
+    }
+}
+
+bool rule_web_get_status_json(const rule_web_t *web, char *out, size_t out_len)
+{
+    if (web == NULL || !rule_web_lock_runtime(web)) {
+        return false;
+    }
+    const bool ok = rule_web_get_status_json_unlocked(web, out, out_len);
+    rule_web_unlock_runtime(web);
+    return ok;
 }
 
 
@@ -805,7 +837,7 @@ static const char *config_preset_from_body(const char *body)
     return NULL;
 }
 
-bool rule_web_handle_request(rule_web_t *web, rule_web_method_t method, const char *path, const char *body, char *out, size_t out_len)
+static bool rule_web_handle_request_unlocked(rule_web_t *web, rule_web_method_t method, const char *path, const char *body, char *out, size_t out_len)
 {
     if (web == NULL || path == NULL || out == NULL || out_len == 0 || !web->started) {
         return false;
@@ -826,7 +858,7 @@ bool rule_web_handle_request(rule_web_t *web, rule_web_method_t method, const ch
         return capability_build_json(out, out_len) > 0;
     }
     if (method == RULE_WEB_METHOD_GET && strcmp(path, "/api/status") == 0) {
-        return rule_web_get_status_json(web, out, out_len);
+        return rule_web_get_status_json_unlocked(web, out, out_len);
     }
     if (method == RULE_WEB_METHOD_GET && strcmp(path, "/api/time") == 0) {
         return app_time_config_json(out, out_len);
@@ -1033,4 +1065,20 @@ bool rule_web_handle_request(rule_web_t *web, rule_web_method_t method, const ch
     }
     const int written = snprintf(out, out_len, "{\"error\":\"not found\"}");
     return written > 0 && (size_t)written < out_len;
+}
+
+bool rule_web_handle_request(rule_web_t *web, rule_web_method_t method, const char *path,
+                             const char *body, char *out, size_t out_len)
+{
+    const bool touches_runtime = path != NULL &&
+        (strcmp(path, "/api/status") == 0 || strcmp(path, "/api/config") == 0 ||
+         strcmp(path, "/api/rules/test") == 0);
+    if (touches_runtime && (web == NULL || !rule_web_lock_runtime(web))) {
+        return false;
+    }
+    const bool ok = rule_web_handle_request_unlocked(web, method, path, body, out, out_len);
+    if (touches_runtime) {
+        rule_web_unlock_runtime(web);
+    }
+    return ok;
 }

@@ -85,6 +85,10 @@ static void test_null_validation_and_read(void)
     assert(board_adc_read_mv(&ctx, channel, NULL) == ESP_ERR_INVALID_ARG);
     assert(board_adc_read_mv(&ctx, channel, &sample) == ESP_OK);
     assert(sample.channel == channel);
+
+    ctx.calibration_enabled = false;
+    ctx.cali_adc1 = NULL;
+    assert(board_adc_read_mv(&ctx, channel, &sample) == ESP_ERR_NOT_SUPPORTED);
 }
 
 int main(void)

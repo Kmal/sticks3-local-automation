@@ -57,8 +57,10 @@ esp_err_t board_adc_init(board_adc_context_t *ctx)
     if (adc_cali_create_scheme_curve_fitting(&cali_cfg, (adc_cali_handle_t *)&ctx->cali_adc1) == ESP_OK) {
         ctx->calibration_enabled = true;
     } else {
-        ESP_LOGW(TAG, "ADC calibration unavailable; using raw millivolt fallback");
+        ESP_LOGW(TAG, "ADC calibration unavailable; voltage facts will fail closed");
     }
+#else
+    ESP_LOGW(TAG, "ADC calibration scheme unavailable; voltage facts will fail closed");
 #endif
     ctx->initialized = true;
     return ESP_OK;
@@ -77,12 +79,13 @@ esp_err_t board_adc_read_mv(board_adc_context_t *ctx,
     if (err != ESP_OK) {
         return err;
     }
-    int measured_mv = raw;
-    if (ctx->calibration_enabled && ctx->cali_adc1 != NULL) {
-        err = adc_cali_raw_to_voltage((adc_cali_handle_t)ctx->cali_adc1, raw, &measured_mv);
-        if (err != ESP_OK) {
-            measured_mv = raw;
-        }
+    if (!ctx->calibration_enabled || ctx->cali_adc1 == NULL) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    int measured_mv = 0;
+    err = adc_cali_raw_to_voltage((adc_cali_handle_t)ctx->cali_adc1, raw, &measured_mv);
+    if (err != ESP_OK) {
+        return err;
     }
     out_sample->channel = channel;
     out_sample->raw = raw;

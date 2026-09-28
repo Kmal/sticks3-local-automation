@@ -585,8 +585,8 @@ bool app_wifi_start_ap_configured(const char *ap_ssid, const char *ap_password, 
         copy_ip(s_ap_ip, ip_info.ip);
     }
     s_ap_started = true;
-    ESP_LOGI(TAG, "setup AP ready: ssid=%s password=%s url=http://%s/",
-             s_config.ap_ssid, strlen(s_config.ap_password) >= 8u ? s_config.ap_password : "<open>", s_ap_ip);
+    ESP_LOGI(TAG, "setup AP ready: ssid=%s security=%s url=http://%s/",
+             s_config.ap_ssid, strlen(s_config.ap_password) >= 8u ? "WPA2" : "open", s_ap_ip);
     return true;
 #endif
 }
