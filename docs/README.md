@@ -72,7 +72,7 @@ The code-derived capability overlay is grouped by how the rule runtime uses each
 | Onboard speaker hardware / AW8737 firmware control | ✅ Implemented/Kconfig-gated | StickS3 has onboard ES8311/AW8737 speaker hardware, and speaker output is exposed as the bounded 16 kHz square-tone `speaker_tone` rule action. The firmware follows the official single-owner mic/speaker pattern, caps configured volume below 75%, uses the source-backed M5PM1 PYG3 amplifier enable sequence, and disables the amplifier after each tone. |
 | Classic Bluetooth audio profiles | 🚫 Not planned / not supported by StickS3 hardware | StickS3 uses ESP32-S3, which does not support Bluetooth Classic / BR/EDR; no unsupported Bluetooth audio transport source or Kconfig option remains in this project. |
 | BLE Audio class device | 🚫 Not planned / not supported by current StickS3 hardware target | The firmware uses a custom BLE GATT rule-event/status service; it does not expose an OS-native BLE Audio microphone/speaker class and no BLE Audio transport is planned for this ESP32-S3 StickS3 target. |
-| USB Audio class device | ⛔ Not implemented / deferred, not marked hardware-unsupported | ESP32-S3 has USB device capability, but this firmware has no USB Audio Class/TinyUSB audio transport path wired; USB Audio remains a separate product decision rather than a current rule-runtime capability. |
+| USB Audio class device | 🟡 Experimental/conditionally implemented; default-disabled | ESP32-S3 UAC microphone, speaker, combined-descriptor, and simultaneous mic+speaker paths are implemented behind `CONFIG_APP_USB_UAC_DEVICE`, but the checked-in default keeps that gate disabled. These paths are host-tested and compile-checked in CI, not hardware-qualified product capabilities. |
 | Wi-Fi station/setup AP | ✅ Implemented/wired | Boot starts Wi-Fi support; station/AP mode, scan/connect/forget/AP/mode APIs are implemented. |
 | HTTP Web UI server | ✅ Implemented/on demand | Server starts only when the on-device Web UI service enables it and stops when the service is disabled. |
 | Web time endpoint | ✅ Implemented | `/api/time` GET/POST is registered and handled. |
@@ -91,7 +91,7 @@ The default transport is a custom Bluetooth LE GATT rule-event service advertise
 
 The default firmware includes capture-only sound-level telemetry for local automation and Web UI status, but it starts monitoring only while enabled `sound.*` rules or Web UI telemetry demand exist and still does not expose PCM debug streaming. The launcher/menu UI is the product UI on boot. Sound trigger enums, metric helpers, and the capture-only sound-level service are available through `CONFIG_APP_SOUND_LEVEL_TRIGGERS=y`, which is enabled in the checked-in defaults and can be disabled for audio-free builds.
 
-**Transport decision:** Unsupported Bluetooth audio profiles are rejected because StickS3 uses ESP32-S3-PICO-1-N8R8 and ESP32-S3 does not support Bluetooth Classic / BR/EDR. BLE Audio class-device work is also marked not-planned for the current ESP32-S3 StickS3 target. USB Audio is different: it is not labeled hardware-unsupported, but it remains deferred until a USB Audio Class design, roles, memory budget, host behavior, and product requirements are verified.
+**Transport decision:** Unsupported Bluetooth audio profiles are rejected because StickS3 uses ESP32-S3-PICO-1-N8R8 and ESP32-S3 does not support Bluetooth Classic / BR/EDR. BLE Audio class-device work is also marked not-planned for the current ESP32-S3 StickS3 target. USB Audio is different: an experimental implementation exists behind default-disabled Kconfig gates, but it remains outside the product image until its host behavior, hardware behavior, memory budget, and product requirements are verified.
 
 ### Wi-Fi and web UI
 
@@ -233,13 +233,15 @@ Currently supported actions are `ble_message`, `http_post`, `ir_send`, and `loca
 
 ## What is planned next
 
-1. Run full ESP-IDF hardware validation on a real StickS3: boot, BLE telemetry, Wi-Fi setup, web UI, NVS save/reload, GPIO fixture tests, IR frame tests, and oscilloscope/logic-analyzer audio clock checks.
+Feature expansion is frozen until the default image passes the measured qualification gate in `docs/hardware_qualification.md`. New HAT integrations, GPIO pulse/frequency sources, Web UI feature phases, and UAC productization must not displace qualification work or be presented as release-ready before that gate is complete.
+
+1. Run the full ESP-IDF hardware qualification on a real StickS3: boot, BLE telemetry, Wi-Fi setup, web UI, NVS save/reload, GPIO fixture tests, IR frame tests, oscilloscope/logic-analyzer audio clock checks, heap/stack measurements, and evidence capture using `docs/hardware_qualification.md`.
 2. Improve the web rule editor beyond the current compact setup page and JSON import/export flow.
 3. Add authenticated or local-only deployment guidance for the web UI before treating it as a user-facing network service.
 4. Implement and validate more external sources only after hardware routes are verified: GPIO pulse/frequency and selected M5Stack HAT sensors. Battery percent, USB/external-power present, BMI270 motion, and safe ADC1 paths are enabled in the default firmware through separate Kconfig gates, but still require hardware bench validation before release claims.
 5. Implement HAT actions only with source-backed protocols and tests.
 6. Bench-validate the Kconfig-gated `speaker_tone` action on StickS3 hardware, including M5PM1 PYG3 amplifier enable/disable, I2S `G14_I2S_DDAC` output, and restoration of demand-driven microphone capture after playback.
-7. Revisit whether the product needs a standard USB Audio class; BLE Audio class-device support is not planned for the current ESP32-S3 StickS3 target, and until USB Audio is explicitly designed and implemented this firmware should be described as a custom BLE rule-event and local automation device, not an OS-native audio endpoint.
+7. Revisit whether the product needs to qualify and ship the experimental USB Audio Class implementation; BLE Audio class-device support is not planned for the current ESP32-S3 StickS3 target, and until UAC is hardware-qualified this firmware should be described as a custom BLE rule-event and local automation device, not an OS-native audio endpoint.
 
 ## Automation implementation status
 
@@ -342,6 +344,8 @@ python3 tools/check_docs_consistency.py
 python3 tools/check_audio_clock.py
 python3 tools/check_audio_safety.py
 python3 tools/check_source_inventory.py
+python3 tools/check_uac_source_inventory.py
+python3 tools/check_web_ui_budget.py
 python3 tools/check_partition_table.py
 python3 tools/check_naming_consistency.py
 tests/host/run_host_tests.sh
