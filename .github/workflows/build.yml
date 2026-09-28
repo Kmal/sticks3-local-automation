@@ -46,6 +46,19 @@ jobs:
       - name: Validate naming consistency
         run: python3 tools/check_naming_consistency.py
 
+      - name: Validate audio clocks and safety
+        run: |
+          python3 tools/check_audio_clock.py
+          python3 tools/check_audio_safety.py
+
+      - name: Validate source inventories
+        run: |
+          python3 tools/check_source_inventory.py
+          python3 tools/check_uac_source_inventory.py
+
+      - name: Validate Web UI asset budget
+        run: python3 tools/check_web_ui_budget.py
+
   host-unit-tests:
     name: Host unit tests
     runs-on: ubuntu-latest
@@ -98,6 +111,34 @@ jobs:
             print(f"factory image bytes: {factory.stat().st_size}")
             print(f"app image bytes: {app.stat().st_size}")
             PY
+
+      - name: Compile experimental UAC variants
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v6.1
+          target: esp32s3
+          command: |
+            make_uac_defaults() {
+              variant="$1"
+              cp config/sdkconfig.defaults "/tmp/sdkconfig.uac-${variant}.defaults"
+              sed -i 's/CONFIG_APP_USB_UAC_DEVICE=n/CONFIG_APP_USB_UAC_DEVICE=y/' "/tmp/sdkconfig.uac-${variant}.defaults"
+              case "${variant}" in
+                mic)
+                  printf '\nCONFIG_APP_USB_UAC_MIC=y\nCONFIG_APP_USB_UAC_SPEAKER=n\n' >> "/tmp/sdkconfig.uac-${variant}.defaults"
+                  ;;
+                speaker)
+                  printf '\nCONFIG_APP_USB_UAC_MIC=n\nCONFIG_APP_USB_UAC_SPEAKER=y\n' >> "/tmp/sdkconfig.uac-${variant}.defaults"
+                  ;;
+              esac
+            }
+
+            make_uac_defaults mic
+            idf.py -B build-uac-mic -D SDKCONFIG_DEFAULTS=/tmp/sdkconfig.uac-mic.defaults set-target esp32s3
+            idf.py -B build-uac-mic -D SDKCONFIG_DEFAULTS=/tmp/sdkconfig.uac-mic.defaults build
+
+            make_uac_defaults speaker
+            idf.py -B build-uac-speaker -D SDKCONFIG_DEFAULTS=/tmp/sdkconfig.uac-speaker.defaults set-target esp32s3
+            idf.py -B build-uac-speaker -D SDKCONFIG_DEFAULTS=/tmp/sdkconfig.uac-speaker.defaults build
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
