@@ -4,6 +4,18 @@
 
 #if CONFIG_APP_USB_UAC_DEVICE
 #include "usb_device_uac.h"
+_Static_assert(CONFIG_UAC_SAMPLE_RATE == CONFIG_APP_USB_UAC_SAMPLE_RATE_HZ,
+               "UAC descriptor and PCM sample rates must match; use the UAC profile defaults");
+#if CONFIG_APP_USB_UAC_MIC
+_Static_assert(CONFIG_UAC_MIC_CHANNEL_NUM == 1, "UAC microphone must be mono");
+#else
+_Static_assert(CONFIG_UAC_MIC_CHANNEL_NUM == 0, "Disable microphone descriptors for speaker-only UAC");
+#endif
+#if CONFIG_APP_USB_UAC_SPEAKER
+_Static_assert(CONFIG_UAC_SPEAKER_CHANNEL_NUM == 1, "UAC speaker must be mono");
+#else
+_Static_assert(CONFIG_UAC_SPEAKER_CHANNEL_NUM == 0, "Disable speaker descriptors for mic-only UAC");
+#endif
 #endif
 
 esp_err_t uac_esp_device_start(uac_device_adapter_t *adapter)

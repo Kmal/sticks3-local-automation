@@ -91,8 +91,21 @@ static void test_null_validation_and_read(void)
     assert(board_adc_read_mv(&ctx, channel, &sample) == ESP_ERR_NOT_SUPPORTED);
 }
 
+static void test_selected_channel_ownership(void)
+{
+    board_adc_context_t context;
+    board_adc_sample_t sample;
+    assert(board_adc_init_mask(&context, 1u << 9) == ESP_OK);
+    assert(context.gpio_mask == (1u << 9));
+    assert(board_adc_read_mv(&context, find_channel("grove.g9"), &sample) == ESP_OK);
+    assert(board_adc_read_mv(&context, find_channel("grove.g10"), &sample) == ESP_ERR_INVALID_ARG);
+    board_adc_deinit(&context);
+    assert(!context.initialized && context.adc1 == NULL);
+}
+
 int main(void)
 {
+    test_selected_channel_ownership();
     test_safe_channel_allowlist();
     test_internal_and_risky_pins_are_excluded();
     test_divider_scaling();

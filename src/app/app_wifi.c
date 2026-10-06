@@ -7,7 +7,7 @@
 #include <string.h>
 
 #ifndef CONFIG_APP_WIFI_ENABLE
-#define CONFIG_APP_WIFI_ENABLE 1
+#define CONFIG_APP_WIFI_ENABLE 0
 #endif
 #ifndef CONFIG_APP_WIFI_AP_SSID
 #define CONFIG_APP_WIFI_AP_SSID "M5StickS3-Setup"
@@ -746,7 +746,10 @@ bool app_wifi_last_connect_failed_due_to_password(void)
 bool app_wifi_scan(app_wifi_scan_results_t *out)
 {
 #if !CONFIG_APP_WIFI_ENABLE
-    (void)out;
+    if (out != NULL) {
+        memset(out, 0, sizeof(*out));
+        (void)snprintf(out->error, sizeof(out->error), "wifi_disabled");
+    }
     return false;
 #else
     if (out == NULL) {
@@ -828,9 +831,10 @@ bool app_wifi_scan_json(char *out, size_t out_len)
     if (out == NULL || out_len == 0) {
         return false;
     }
-    app_wifi_scan_results_t scan;
+    app_wifi_scan_results_t scan = {0};
     if (!app_wifi_scan(&scan)) {
-        return snprintf(out, out_len, "{\"ok\":false,\"error\":\"%s\"}", scan.error[0] != '\0' ? scan.error : "scan_failed") > 0;
+        const int written = snprintf(out, out_len, "{\"ok\":false,\"error\":\"%s\"}", scan.error[0] != '\0' ? scan.error : "scan_failed");
+        return written > 0 && (size_t)written < out_len;
     }
     char *cursor = out;
     size_t remaining = out_len;

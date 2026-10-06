@@ -1,10 +1,10 @@
+#include <stdatomic.h>
 /*
  * Main firmware entry point for the M5Stack StickS3 configuration and local
  * automation application.
  */
 
 #include <stdbool.h>
-#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,27 +57,25 @@ static atomic_bool s_rule_runtime_ready;
 static SemaphoreHandle_t s_rule_mutex;
 static TaskHandle_t s_rule_gpio_task;
 static TaskHandle_t s_rule_network_task;
-static bool s_rule_network_state_known;
-static bool s_rule_network_ready;
 #if CONFIG_APP_SOUND_LEVEL_TRIGGERS
 static sound_level_service_t *s_sound_level_service;
+static SemaphoreHandle_t s_audio_mutex;
+static TaskHandle_t s_sound_manager_task;
 static bool s_sound_level_ready;
 static bool s_sound_level_audio_initialized;
 static app_sound_level_demand_t s_sound_level_demand;
 #endif
 #if CONFIG_APP_TRANSPORT_BLE_GATT_RULE_EVENTS
 static TaskHandle_t s_rule_ble_task;
-static bool s_rule_ble_state_known;
-static bool s_rule_ble_connected;
 #endif
 
 #if CONFIG_APP_SOUND_LEVEL_TRIGGERS
-static bool app_sound_level_capture_needed(const automation_config_t *config);
 static bool app_sound_level_status_json(char *out, size_t out_len, void *ctx);
 static void app_sound_level_release_audio(void);
 static void app_sound_level_release_if_stopped(void);
 static bool app_sound_level_stop(void);
-static void app_sound_level_sync(const automation_config_t *config);
+static void app_sound_level_sync(bool needed);
+static void app_sound_manager(void *ctx);
 #endif
 
 static esp_err_t app_network_stack_init(void)
@@ -156,21 +154,20 @@ static action_result_t app_send_speaker_rule_action(const rule_event_t *event, v
         result.action = event->action;
     }
 #if CONFIG_APP_SOUND_LEVEL_TRIGGERS
-    /* Official StickS3 examples stop the microphone before speaker playback and
-     * restart it afterwards.  Keep the same single-owner I2S policy here so the
-     * speaker action never attempts to share the ES8311/I2S path with capture. */
+    /* All codec transitions have the same owner lock. Never take the rule
+     * mutex while holding this lock; capture may need it while stopping. */
+    if (s_audio_mutex == NULL || xSemaphoreTake(s_audio_mutex, portMAX_DELAY) != pdTRUE) {
+        result.code = ACTION_RESULT_NOT_STARTED;
+        return result;
+    }
     const bool capture_stopped = app_sound_level_stop();
 #else
     const bool capture_stopped = true;
 #endif
-    if (!capture_stopped) {
-        ESP_LOGE(TAG, "speaker action rejected because microphone capture did not stop");
-        result.code = ACTION_RESULT_UNSUPPORTED;
-    } else if (!action_speaker_send_event(event)) {
-        result.code = ACTION_RESULT_UNSUPPORTED;
-    }
+    if (!capture_stopped || !action_speaker_send_event(event)) result.code = ACTION_RESULT_UNSUPPORTED;
 #if CONFIG_APP_SOUND_LEVEL_TRIGGERS
-    app_sound_level_sync(&s_rule_config);
+    xSemaphoreGive(s_audio_mutex);
+    /* The demand manager restores capture after releasing the playback owner. */
 #endif
     return result;
 }
@@ -234,17 +231,10 @@ static void app_rule_network_state_task(void *ctx)
 {
     (void)ctx;
     while (true) {
-        if (!s_rule_runtime_ready) {
-            vTaskDelay(pdMS_TO_TICKS(20));
-            continue;
-        }
+        if (!s_rule_runtime_ready) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
         const bool ready = action_http_network_ready();
         const uint32_t uptime_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
-        if (!s_rule_network_state_known || ready != s_rule_network_ready) {
-            s_rule_network_state_known = true;
-            s_rule_network_ready = ready;
-            app_emit_wifi_connected_rule_fact(ready, uptime_ms);
-        }
+        app_emit_wifi_connected_rule_fact(ready, uptime_ms);
         vTaskDelay(pdMS_TO_TICKS(250));
     }
 }
@@ -267,17 +257,10 @@ static void app_rule_ble_state_task(void *ctx)
 {
     (void)ctx;
     while (true) {
-        if (!s_rule_runtime_ready) {
-            vTaskDelay(pdMS_TO_TICKS(20));
-            continue;
-        }
+        if (!s_rule_runtime_ready) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
         const bool connected = transport_ble_gatt_is_connected();
         const uint32_t uptime_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
-        if (!s_rule_ble_state_known || connected != s_rule_ble_connected) {
-            s_rule_ble_state_known = true;
-            s_rule_ble_connected = connected;
-            app_emit_ble_connected_rule_fact(connected, uptime_ms);
-        }
+        app_emit_ble_connected_rule_fact(connected, uptime_ms);
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
@@ -285,9 +268,7 @@ static void app_rule_ble_state_task(void *ctx)
 
 static void app_emit_button_rule_fact(button_state_event_t event)
 {
-    if (!s_rule_runtime_ready) {
-        return;
-    }
+    if (!s_rule_runtime_ready) return;
     const uint32_t uptime_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
     if (s_rule_mutex != NULL && xSemaphoreTake(s_rule_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         (void)rule_runtime_process_button_event(&s_rule_runtime, event, uptime_ms);
@@ -299,14 +280,12 @@ static void app_rule_gpio_poll_task(void *ctx)
 {
     (void)ctx;
     while (true) {
-        if (!s_rule_runtime_ready) {
-            vTaskDelay(pdMS_TO_TICKS(20));
-            continue;
-        }
+        if (!s_rule_runtime_ready) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
         const uint32_t uptime_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
         if (s_rule_mutex != NULL && xSemaphoreTake(s_rule_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
             (void)rule_runtime_poll_gpio(&s_rule_runtime, uptime_ms);
             (void)rule_runtime_poll_hardware(&s_rule_runtime, uptime_ms);
+            (void)rule_runtime_tick(&s_rule_runtime, uptime_ms);
             xSemaphoreGive(s_rule_mutex);
         }
         vTaskDelay(pdMS_TO_TICKS(20));
@@ -326,17 +305,18 @@ static bool app_rule_runtime_init(void)
         s_rule_mutex = xSemaphoreCreateMutex();
         ESP_LOGI(TAG, "rule runtime init: mutex %s", s_rule_mutex != NULL ? "created" : "create failed");
     }
-    if (s_rule_mutex == NULL) {
-        ESP_LOGE(TAG, "rule runtime init: mutex allocation failed");
-        return false;
-    }
+    if (s_rule_mutex == NULL || !s_rule_store.opened) return false;
     (void)xSemaphoreTake(s_rule_mutex, portMAX_DELAY);
     if (!rule_runtime_init(&s_rule_runtime, &s_rule_config)) {
         xSemaphoreGive(s_rule_mutex);
-        ESP_LOGE(TAG, "rule runtime init: core initialization failed");
         return false;
     }
-    ESP_LOGI(TAG, "rule runtime init: core initialized");
+#if CONFIG_APP_SOUND_LEVEL_TRIGGERS
+    s_audio_mutex = xSemaphoreCreateMutex();
+    if (s_audio_mutex == NULL) goto failed;
+    rule_web_set_sound_status_builder(app_sound_level_status_json, NULL);
+#endif
+    ESP_LOGI(TAG, "rule runtime init: core runtime ready");
     rule_runtime_set_http_sender(&s_rule_runtime, app_send_http_rule_action, NULL);
     rule_runtime_set_ir_sender(&s_rule_runtime, app_send_ir_rule_action, NULL);
     rule_runtime_set_local_ui_sender(&s_rule_runtime, app_send_local_ui_rule_action, NULL);
@@ -347,56 +327,42 @@ static bool app_rule_runtime_init(void)
     rule_runtime_set_ble_sender(&s_rule_runtime, app_send_ble_rule_action, NULL);
 #endif
     ESP_LOGI(TAG, "rule runtime init: web server deferred until Web UI is enabled");
-    if (s_rule_mutex != NULL) {
-        xSemaphoreGive(s_rule_mutex);
-    }
     if (s_rule_gpio_task == NULL) {
         BaseType_t created = xTaskCreate(app_rule_gpio_poll_task, "rule_gpio_poll", 3072, NULL, tskIDLE_PRIORITY + 1, &s_rule_gpio_task);
         ESP_LOGI(TAG, "rule runtime init: gpio poll task %s", created == pdPASS ? "created" : "create failed");
-        if (created != pdPASS) {
-            goto task_failure;
-        }
+        if (created != pdPASS) goto failed;
     }
     if (s_rule_network_task == NULL) {
         BaseType_t created = xTaskCreate(app_rule_network_state_task, "rule_net_state", 3072, NULL, tskIDLE_PRIORITY + 1, &s_rule_network_task);
         ESP_LOGI(TAG, "rule runtime init: network state task %s", created == pdPASS ? "created" : "create failed");
-        if (created != pdPASS) {
-            goto task_failure;
-        }
+        if (created != pdPASS) goto failed;
     }
 #if CONFIG_APP_TRANSPORT_BLE_GATT_RULE_EVENTS
     if (s_rule_ble_task == NULL) {
         BaseType_t created = xTaskCreate(app_rule_ble_state_task, "rule_ble_state", 3072, NULL, tskIDLE_PRIORITY + 1, &s_rule_ble_task);
         ESP_LOGI(TAG, "rule runtime init: BLE state task %s", created == pdPASS ? "created" : "create failed");
-        if (created != pdPASS) {
-            goto task_failure;
-        }
+        if (created != pdPASS) goto failed;
     }
+#endif
+#if CONFIG_APP_SOUND_LEVEL_TRIGGERS
+    if (xTaskCreate(app_sound_manager, "sound_owner", 4096, NULL, tskIDLE_PRIORITY + 1, &s_sound_manager_task) != pdPASS) goto failed;
 #endif
     s_rule_runtime_ready = true;
-    ESP_LOGI(TAG, "rule runtime init: core and producer tasks ready");
-#if CONFIG_APP_SOUND_LEVEL_TRIGGERS
-    app_sound_level_sync(&s_rule_config);
-#endif
+    xSemaphoreGive(s_rule_mutex);
     return true;
-
-task_failure:
-    if (s_rule_gpio_task != NULL) {
-        vTaskDelete(s_rule_gpio_task);
-        s_rule_gpio_task = NULL;
-    }
-    if (s_rule_network_task != NULL) {
-        vTaskDelete(s_rule_network_task);
-        s_rule_network_task = NULL;
-    }
+failed:
+    if (s_rule_gpio_task != NULL) { vTaskDelete(s_rule_gpio_task); s_rule_gpio_task = NULL; }
+    if (s_rule_network_task != NULL) { vTaskDelete(s_rule_network_task); s_rule_network_task = NULL; }
 #if CONFIG_APP_TRANSPORT_BLE_GATT_RULE_EVENTS
-    if (s_rule_ble_task != NULL) {
-        vTaskDelete(s_rule_ble_task);
-        s_rule_ble_task = NULL;
-    }
+    if (s_rule_ble_task != NULL) { vTaskDelete(s_rule_ble_task); s_rule_ble_task = NULL; }
+#endif
+#if CONFIG_APP_SOUND_LEVEL_TRIGGERS
+    if (s_audio_mutex != NULL) { vSemaphoreDelete(s_audio_mutex); s_audio_mutex = NULL; }
 #endif
     action_dispatcher_stop(&s_rule_runtime.dispatcher);
-    ESP_LOGE(TAG, "rule runtime init: producer task allocation failed; runtime stopped");
+    hardware_fact_service_deinit(&s_rule_runtime.hardware_facts);
+    xSemaphoreGive(s_rule_mutex);
+    ESP_LOGE(TAG, "rule runtime initialization failed; dependent services stay disabled");
     return false;
 }
 
@@ -409,24 +375,35 @@ static bool app_sound_level_status_json(char *out, size_t out_len, void *ctx)
         return false;
     }
 
-    app_sound_level_release_if_stopped();
-    if (s_sound_level_ready) {
-        return sound_level_service_build_status_json(s_sound_level_service, out, out_len);
+    if (s_audio_mutex == NULL || xSemaphoreTake(s_audio_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        const int n = snprintf(out, out_len, "{\"enabled\":true,\"running\":false,\"state\":\"playback_or_transition\"}");
+        return n > 0 && (size_t)n < out_len;
     }
-    if (!app_sound_level_capture_needed(&s_rule_config)) {
-        const int written = snprintf(out, out_len,
-                                     "{\"enabled\":false,\"running\":false,"
-                                     "\"state\":\"idle\","
-                                     "\"reason\":\"no_enabled_sound_rule\"}");
-        return written > 0 && (size_t)written < out_len;
+    bool ok;
+    if (s_sound_level_service != NULL) {
+        ok = sound_level_service_build_status_json(s_sound_level_service, out, out_len);
+    } else {
+        const int n = snprintf(out, out_len, "{\"enabled\":true,\"running\":false,\"state\":\"idle\"}");
+        ok = n > 0 && (size_t)n < out_len;
     }
-    return sound_level_service_build_status_json(NULL, out, out_len);
+    xSemaphoreGive(s_audio_mutex);
+    return ok;
 }
 
-static bool app_sound_level_capture_needed(const automation_config_t *config)
+static void app_sound_manager(void *ctx)
 {
-    app_sound_level_demand_update_trigger(&s_sound_level_demand, config);
-    return app_sound_level_demand_capture_needed(&s_sound_level_demand);
+    (void)ctx;
+    while (true) {
+        if (!s_rule_runtime_ready) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
+        (void)xSemaphoreTake(s_rule_mutex, portMAX_DELAY);
+        app_sound_level_demand_update_trigger(&s_sound_level_demand, &s_rule_config);
+        const bool needed = app_sound_level_demand_capture_needed(&s_sound_level_demand);
+        xSemaphoreGive(s_rule_mutex);
+        (void)xSemaphoreTake(s_audio_mutex, portMAX_DELAY);
+        app_sound_level_sync(needed);
+        xSemaphoreGive(s_audio_mutex);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
 }
 
 static void app_sound_level_release_audio(void)
@@ -443,6 +420,7 @@ static void app_sound_level_release_if_stopped(void)
     if (s_sound_level_service == NULL || s_sound_level_service->task != NULL) {
         return;
     }
+    sound_level_service_deinit(s_sound_level_service);
     free(s_sound_level_service);
     s_sound_level_service = NULL;
     app_sound_level_release_audio();
@@ -470,11 +448,9 @@ static bool app_sound_level_stop(void)
  * This keeps sensor monitoring demand-driven even though the sound feature is
  * compiled into the default build. Web UI telemetry keeps capture active through
  * the same shared service so there is still only one I2S reader. */
-static void app_sound_level_sync(const automation_config_t *config)
+static void app_sound_level_sync(bool needed)
 {
-    rule_web_set_sound_status_builder(app_sound_level_status_json, NULL);
-
-    if (!app_sound_level_capture_needed(config)) {
+    if (!needed) {
         app_sound_level_stop();
         return;
     }
@@ -530,6 +506,7 @@ static void app_sound_level_sync(const automation_config_t *config)
 
     if (!sound_level_service_start(s_sound_level_service)) {
         ESP_LOGE(TAG, "sound triggers: service task create failed");
+        sound_level_service_deinit(s_sound_level_service);
         free(s_sound_level_service);
         s_sound_level_service = NULL;
         app_sound_level_release_audio();
@@ -537,9 +514,7 @@ static void app_sound_level_sync(const automation_config_t *config)
     }
 
     s_sound_level_ready = true;
-    ESP_LOGI(TAG, "sound capture: capture task started (trigger_demand=%s telemetry_demand=%s)",
-             s_sound_level_demand.trigger ? "true" : "false",
-             s_sound_level_demand.telemetry ? "true" : "false");
+    ESP_LOGI(TAG, "sound capture: capture task started for active demand");
 }
 #endif
 
@@ -568,40 +543,14 @@ static void key2_pressed_cb(void *ctx)
 static void automation_config_changed_cb(void *ctx)
 {
     (void)ctx;
-    automation_config_t config;
-    automation_config_set_defaults(&config);
-    if (!s_rule_store.opened && !rule_config_store_open(&s_rule_store)) {
-        ESP_LOGW(TAG, "status UI automation update: failed to open config store");
-        return;
-    }
-    bool loaded = rule_config_store_load(&s_rule_store, &config);
-    if (!loaded) {
-        ESP_LOGW(TAG, "status UI automation update: failed to reload config");
-        return;
-    }
-    if (!s_rule_runtime_ready) {
-        s_rule_config = config;
-        ESP_LOGI(TAG, "status UI automation update: runtime refresh deferred until init");
-        return;
-    }
-    if (s_rule_mutex != NULL) {
-        (void)xSemaphoreTake(s_rule_mutex, portMAX_DELAY);
-    }
-    bool replaced = rule_runtime_replace_config(&s_rule_runtime, &config);
-    if (replaced) {
-        s_rule_config = config;
-        ESP_LOGI(TAG, "status UI automation update: runtime config refreshed");
-    } else {
-        ESP_LOGW(TAG, "status UI automation update: runtime config refresh failed");
-    }
-    if (s_rule_mutex != NULL) {
-        xSemaphoreGive(s_rule_mutex);
-    }
-#if CONFIG_APP_SOUND_LEVEL_TRIGGERS
-    if (replaced) {
-        app_sound_level_sync(&s_rule_config);
-    }
-#endif
+    automation_config_t *config = malloc(sizeof(*config));
+    if (config == NULL) return;
+    if (!s_rule_runtime_ready || s_rule_mutex == NULL) { free(config); return; }
+    (void)xSemaphoreTake(s_rule_mutex, portMAX_DELAY);
+    if (rule_config_store_load(&s_rule_store, config) && rule_runtime_replace_config(&s_rule_runtime, config)) s_rule_config = *config;
+    else ESP_LOGW(TAG, "automation update: runtime refresh failed");
+    xSemaphoreGive(s_rule_mutex);
+    free(config);
 }
 
 static void app_rule_web_config_changed_cb(const automation_config_t *config, void *ctx)
@@ -611,15 +560,13 @@ static void app_rule_web_config_changed_cb(const automation_config_t *config, vo
         return;
     }
     s_rule_config = *config;
-#if CONFIG_APP_SOUND_LEVEL_TRIGGERS
-    app_sound_level_sync(&s_rule_config);
-#endif
+
 }
 
 static bool app_rule_web_runtime_lock(void *ctx)
 {
     SemaphoreHandle_t mutex = (SemaphoreHandle_t)ctx;
-    return mutex == NULL || xSemaphoreTake(mutex, pdMS_TO_TICKS(1000)) == pdTRUE;
+    return mutex != NULL && xSemaphoreTake(mutex, pdMS_TO_TICKS(1000)) == pdTRUE;
 }
 
 static void app_rule_web_runtime_unlock(void *ctx)
@@ -635,32 +582,26 @@ static void app_rule_web_runtime_unlock(void *ctx)
  * the on-device Web UI flow has explicitly enabled the service. */
 static void app_web_ui_service_changed(bool enabled, void *ctx)
 {
+    (void)ctx;
     if (enabled && !s_rule_runtime_ready) {
-        ESP_LOGE(TAG, "Web UI unavailable: automation runtime is not ready");
         status_ui_set_state(STATUS_UI_STATE_ERROR);
+        ESP_LOGE(TAG, "web UI unavailable: rule runtime failed to initialize");
         return;
     }
-
-    (void)ctx;
     if (!s_rule_runtime_ready) {
         ESP_LOGW(TAG, "web UI service change ignored before rule runtime is ready: %s", enabled ? "enable" : "disable");
         return;
     }
 
-#if CONFIG_APP_SOUND_LEVEL_TRIGGERS
-    bool sound_telemetry_changed = false;
-#endif
     if (s_rule_mutex != NULL) {
         (void)xSemaphoreTake(s_rule_mutex, portMAX_DELAY);
     }
     if (enabled) {
-        if (!s_rule_web.started && rule_web_start(&s_rule_web, &s_rule_runtime, &s_rule_store)) {
-            rule_web_set_runtime_lock(&s_rule_web, app_rule_web_runtime_lock,
-                                      app_rule_web_runtime_unlock, s_rule_mutex);
+        if (!s_rule_web.started && rule_web_start_locked(&s_rule_web, &s_rule_runtime, &s_rule_store,
+                                                       app_rule_web_runtime_lock, app_rule_web_runtime_unlock, s_rule_mutex)) {
             rule_web_set_config_changed_callback(&s_rule_web, app_rule_web_config_changed_cb, NULL);
 #if CONFIG_APP_SOUND_LEVEL_TRIGGERS
             app_sound_level_demand_set_telemetry(&s_sound_level_demand, true);
-            sound_telemetry_changed = true;
 #endif
             app_wifi_status_t wifi_status;
             if (app_wifi_get_status(&wifi_status)) {
@@ -676,7 +617,6 @@ static void app_web_ui_service_changed(bool enabled, void *ctx)
             rule_web_stop(&s_rule_web);
 #if CONFIG_APP_SOUND_LEVEL_TRIGGERS
             app_sound_level_demand_set_telemetry(&s_sound_level_demand, false);
-            sound_telemetry_changed = true;
 #endif
             ESP_LOGI(TAG, "web UI server stopped and resources released");
         }
@@ -684,11 +624,7 @@ static void app_web_ui_service_changed(bool enabled, void *ctx)
     if (s_rule_mutex != NULL) {
         xSemaphoreGive(s_rule_mutex);
     }
-#if CONFIG_APP_SOUND_LEVEL_TRIGGERS
-    if (sound_telemetry_changed) {
-        app_sound_level_sync(&s_rule_config);
-    }
-#endif
+
 }
 
 static void app_idle_forever(void)
@@ -736,7 +672,6 @@ void app_main(void)
     }
     if (!app_rule_runtime_init()) {
         status_ui_set_state(STATUS_UI_STATE_ERROR);
-        ESP_LOGE(TAG, "Local automation failed to start; staying alive in error state");
         app_idle_forever();
     }
 

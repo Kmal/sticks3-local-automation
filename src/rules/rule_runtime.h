@@ -35,6 +35,7 @@ void rule_runtime_set_ir_sender(rule_runtime_t *runtime, action_dispatcher_send_
 void rule_runtime_set_local_ui_sender(rule_runtime_t *runtime, action_dispatcher_send_cb_t cb, void *ctx);
 void rule_runtime_set_speaker_sender(rule_runtime_t *runtime, action_dispatcher_send_cb_t cb, void *ctx);
 size_t rule_runtime_process_fact(rule_runtime_t *runtime, const trigger_fact_t *fact);
+size_t rule_runtime_tick(rule_runtime_t *runtime, uint32_t uptime_ms);
 size_t rule_runtime_process_metrics(rule_runtime_t *runtime, const audio_level_metrics_t *metrics, uint32_t uptime_ms);
 size_t rule_runtime_process_button_event(rule_runtime_t *runtime, button_state_event_t event, uint32_t uptime_ms);
 size_t rule_runtime_poll_gpio(rule_runtime_t *runtime, uint32_t uptime_ms);

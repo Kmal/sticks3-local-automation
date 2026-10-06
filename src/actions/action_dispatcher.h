@@ -37,6 +37,7 @@ typedef action_result_t (*action_dispatcher_send_cb_t)(const rule_event_t *event
 typedef struct {
     bool started;
 #ifdef ESP_PLATFORM
+    portMUX_TYPE result_lock;
     QueueHandle_t queue_handle;
     TaskHandle_t worker_task;
     bool stop_requested;

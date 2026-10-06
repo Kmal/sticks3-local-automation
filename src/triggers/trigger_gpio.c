@@ -53,6 +53,15 @@ bool trigger_gpio_init(trigger_gpio_t *gpio, rule_source_t source, const rule_gp
     return true;
 }
 
+void trigger_gpio_deinit(trigger_gpio_t *gpio)
+{
+    if (gpio == NULL || !gpio->enabled) return;
+#ifdef ESP_PLATFORM
+    (void)gpio_reset_pin((gpio_num_t)gpio->config.pin);
+#endif
+    gpio->enabled = false;
+}
+
 bool trigger_gpio_probe(const trigger_gpio_t *gpio)
 {
     return gpio != NULL && gpio->enabled;
@@ -82,6 +91,7 @@ size_t trigger_gpio_poll(trigger_gpio_t *gpio, trigger_adapter_t *adapter, uint3
         gpio->last_level = level;
         gpio->stable_level = level;
         gpio->last_change_ms = uptime_ms;
+        gpio->initial_pending = gpio->source == RULE_SOURCE_GPIO_DIGITAL;
         return 0;
     }
 
@@ -94,11 +104,12 @@ size_t trigger_gpio_poll(trigger_gpio_t *gpio, trigger_adapter_t *adapter, uint3
     if (debounce_ms == 0) {
         debounce_ms = RULE_GPIO_MIN_DEBOUNCE_MS;
     }
-    if (level == gpio->stable_level || uptime_ms - gpio->last_change_ms < debounce_ms) {
+    if ((!gpio->initial_pending && level == gpio->stable_level) || uptime_ms - gpio->last_change_ms < debounce_ms) {
         return 0;
     }
 
     gpio->stable_level = level;
+    gpio->initial_pending = false;
     if ((gpio->config.profile == RULE_GPIO_PROFILE_RISING_EDGE && !level) ||
         (gpio->config.profile == RULE_GPIO_PROFILE_FALLING_EDGE && level)) {
         return 0;

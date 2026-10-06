@@ -15,7 +15,16 @@ static bool runtime_build_gpio_triggers(const automation_config_t *config, trigg
         if (!rule->enabled || !rule_source_is_gpio(rule->when.source)) {
             continue;
         }
+        bool duplicate = false;
+        for (size_t j = 0; j < count; ++j) {
+            duplicate |= out[j].source == rule->when.source && out[j].config.pin == rule->when.gpio.pin &&
+                         out[j].config.profile == rule->when.gpio.profile &&
+                         out[j].config.active_low == rule->when.gpio.active_low &&
+                         out[j].config.debounce_ms == rule->when.gpio.debounce_ms;
+        }
+        if (duplicate) continue;
         if (count >= RULE_MAX_RULES || !trigger_gpio_init(&out[count], rule->when.source, &rule->when.gpio)) {
+            for (size_t j = 0; j < count; ++j) trigger_gpio_deinit(&out[j]);
             return false;
         }
         ++count;
@@ -73,10 +82,12 @@ bool rule_runtime_init(rule_runtime_t *runtime, const automation_config_t *confi
         return false;
     }
     trigger_adapter_init(&runtime->trigger_adapter, runtime_fact_sink, runtime);
-    hardware_fact_service_config_t hw_cfg = hardware_fact_service_default_config();
+    hardware_fact_service_config_t hw_cfg;
+    hardware_fact_service_config_for_rules(&hw_cfg, config);
     (void)hardware_fact_service_init(&runtime->hardware_facts, &runtime->trigger_adapter, &hw_cfg);
     if (!runtime_apply_gpio_triggers(runtime, config)) {
         action_dispatcher_stop(&runtime->dispatcher);
+        hardware_fact_service_deinit(&runtime->hardware_facts);
         free(defaults);
         return false;
     }
@@ -90,24 +101,33 @@ bool rule_runtime_replace_config_with_commit(rule_runtime_t *runtime, const auto
     if (runtime == NULL || config == NULL || !automation_config_validate(config, NULL, 0)) {
         return false;
     }
+    hardware_fact_service_config_t hw_cfg;
+    hardware_fact_service_config_for_rules(&hw_cfg, config);
+    const hardware_fact_service_config_t old = runtime->hardware_facts.config;
+    const bool hardware_changed = old.enable_battery != hw_cfg.enable_battery || old.enable_usb_power != hw_cfg.enable_usb_power ||
+        old.enable_bmi270 != hw_cfg.enable_bmi270 || old.enable_adc != hw_cfg.enable_adc || old.adc_gpio_mask != hw_cfg.adc_gpio_mask;
+    /* Release ADC pin ownership before setting up newly selected GPIO inputs. */
+    if (hardware_changed) hardware_fact_service_deinit(&runtime->hardware_facts);
+    for (size_t i = 0; i < runtime->gpio_trigger_count; ++i) trigger_gpio_deinit(&runtime->gpio_triggers[i]);
     trigger_gpio_t triggers[RULE_MAX_RULES];
     size_t count = 0;
-    if (!runtime_build_gpio_triggers(config, triggers, &count) || (commit != NULL && !commit(config, ctx))) {
+    const bool prepared = runtime_build_gpio_triggers(config, triggers, &count);
+    if (!prepared || (commit != NULL && !commit(config, ctx))) {
+        for (size_t i = 0; i < count; ++i) trigger_gpio_deinit(&triggers[i]);
+        if (hardware_changed) (void)hardware_fact_service_init(&runtime->hardware_facts, &runtime->trigger_adapter, &old);
+        (void)runtime_apply_gpio_triggers(runtime, &runtime->engine.config);
         return false;
     }
-    /* Validation above guarantees this cannot fail for the prepared config. */
-    (void)rule_engine_replace_config(&runtime->engine, config);
+    if (hardware_changed) {
+        (void)hardware_fact_service_init(&runtime->hardware_facts, &runtime->trigger_adapter, &hw_cfg);
+    }
+    if (!rule_engine_replace_config(&runtime->engine, config)) return false;
     memset(runtime->gpio_triggers, 0, sizeof(runtime->gpio_triggers));
     if (count > 0) {
         memcpy(runtime->gpio_triggers, triggers, count * sizeof(triggers[0]));
     }
     runtime->gpio_trigger_count = count;
     return true;
-}
-
-bool rule_runtime_replace_config(rule_runtime_t *runtime, const automation_config_t *config)
-{
-    return rule_runtime_replace_config_with_commit(runtime, config, NULL, NULL);
 }
 
 void rule_runtime_set_ble_sender(rule_runtime_t *runtime, action_dispatcher_send_cb_t cb, void *ctx)
@@ -150,24 +170,29 @@ void rule_runtime_set_speaker_sender(rule_runtime_t *runtime, action_dispatcher_
     action_dispatcher_set_speaker_sender(&runtime->dispatcher, cb, ctx);
 }
 
-static bool runtime_enqueue_batch(const rule_event_batch_t *batch, void *ctx)
+static bool runtime_action_sink(const rule_event_batch_t *batch, void *ctx)
 {
     rule_runtime_t *runtime = ctx;
-    if (!action_enqueue_batch(&runtime->dispatcher, batch)) {
-        runtime->enqueue_errors += batch->event_count;
-        return false;
-    }
-    return true;
+    if (action_enqueue_batch(&runtime->dispatcher, batch)) return true;
+    runtime->enqueue_errors += batch->event_count;
+    return false;
 }
 
 size_t rule_runtime_process_fact(rule_runtime_t *runtime, const trigger_fact_t *fact)
 {
-    if (runtime == NULL || fact == NULL) {
-        return 0;
-    }
-    runtime->last_event_count = rule_engine_process_fact_with_sink(&runtime->engine, fact,
-                                                                  runtime_enqueue_batch, runtime);
+    if (runtime == NULL || fact == NULL) return 0;
+    runtime->last_event_count = rule_engine_process_fact_to_sink(&runtime->engine, fact, runtime_action_sink, runtime);
     return runtime->last_event_count;
+}
+
+size_t rule_runtime_tick(rule_runtime_t *runtime, uint32_t uptime_ms)
+{
+    if (runtime == NULL) return 0;
+    const size_t count = rule_engine_tick_to_sink(&runtime->engine, uptime_ms, runtime_action_sink, runtime);
+#ifndef ESP_PLATFORM
+    (void)action_dispatcher_process_all(&runtime->dispatcher);
+#endif
+    return count;
 }
 
 size_t rule_runtime_process_metrics(rule_runtime_t *runtime, const audio_level_metrics_t *metrics, uint32_t uptime_ms)
@@ -236,4 +261,9 @@ action_result_t rule_runtime_get_last_action_result(const rule_runtime_t *runtim
         return action_dispatcher_get_last_result(NULL);
     }
     return action_dispatcher_get_last_result(&runtime->dispatcher);
+}
+
+bool rule_runtime_replace_config(rule_runtime_t *runtime, const automation_config_t *config)
+{
+    return rule_runtime_replace_config_with_commit(runtime, config, NULL, NULL);
 }

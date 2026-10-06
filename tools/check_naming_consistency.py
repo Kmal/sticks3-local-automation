@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SKIP_DIRS = {".git", "build", "__pycache__", ".pytest_cache"}
+SKIP_DIRS = {".git", "build", "managed_components", "vendor", "__pycache__", ".pytest_cache"}
 TEXT_SUFFIXES = {
     "",
     ".c",
@@ -62,6 +62,8 @@ REQUIRED_TEXT = {
 def iter_repo_text_files() -> list[Path]:
     paths: list[Path] = []
     for path in ROOT.rglob("*"):
+        if path.relative_to(ROOT).parts[0].startswith("build-"):
+            continue
         if any(part in SKIP_DIRS for part in path.relative_to(ROOT).parts):
             continue
         if not path.is_file() or path == Path(__file__).resolve():

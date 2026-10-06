@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdatomic.h>
 
 typedef enum {
     SOUND_LEVEL_SERVICE_STOPPED = 0,
@@ -32,23 +33,24 @@ typedef struct {
 } sound_level_service_config_t;
 
 typedef struct {
-    sound_level_service_state_t state;
+    _Atomic(sound_level_service_state_t) state;
     rule_runtime_t *runtime;
     SemaphoreHandle_t runtime_mutex;
-    TaskHandle_t task;
+    _Atomic(TaskHandle_t) task;
+    SemaphoreHandle_t status_mutex;
     sound_level_service_config_t config;
     audio_metrics_accumulator_t accumulator;
     audio_calibration_t calibration;
     audio_level_metrics_t last_metrics;
     uint32_t next_metrics_sequence;
-    uint32_t emitted_windows;
-    uint32_t read_errors;
+    _Atomic uint32_t emitted_windows;
+    _Atomic uint32_t read_errors;
     uint32_t consecutive_read_errors;
-    uint32_t underrun_windows;
-    uint32_t dropped_runtime_lock_count;
+    _Atomic uint32_t underrun_windows;
+    _Atomic uint32_t dropped_runtime_lock_count;
     esp_err_t last_error;
     bool last_metrics_valid;
-    bool stop_requested;
+    _Atomic bool stop_requested;
 } sound_level_service_t;
 
 void sound_level_service_config_defaults(sound_level_service_config_t *config);
@@ -59,6 +61,7 @@ bool sound_level_service_init(sound_level_service_t *service,
                               const sound_level_service_config_t *config);
 
 bool sound_level_service_start(sound_level_service_t *service);
+void sound_level_service_deinit(sound_level_service_t *service);
 void sound_level_service_request_stop(sound_level_service_t *service);
 bool sound_level_service_is_running(const sound_level_service_t *service);
 

@@ -2,6 +2,7 @@
 #include "app_wifi.h"
 #include "trigger_gpio.h"
 #include "trigger_hat.h"
+#include "ui_model.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -280,6 +281,99 @@ static void test_rule_web_status(void)
     rule_config_store_close(&store);
 }
 
+
+static void test_complete_config_roundtrip_and_strict_parser(void)
+{
+    automation_config_t config;
+    automation_config_set_defaults(&config);
+    config.rule_count = RULE_MAX_RULES;
+    for (size_t i = 0; i < config.rule_count; ++i) {
+        config.rules[i] = config.rules[0];
+        config.rules[i].id = (uint32_t)i + 1;
+        config.rules[i].action_count = 3;
+        for (size_t j = 0; j < 3; ++j) {
+            rule_action_t *action = &config.rules[i].actions[j];
+            *action = config.rules[0].actions[0];
+            action->type = RULE_ACTION_HTTP_POST;
+            snprintf(action->http_url, sizeof(action->http_url), "https://example.invalid/hook/%zu/%zu", i, j);
+            snprintf(action->http_bearer_token, sizeof(action->http_bearer_token), "secret-%zu-%zu", i, j);
+            action->timeout_ms = 1000;
+        }
+    }
+    config.rules[7].actions[2].type = RULE_ACTION_IR_SEND;
+    config.rules[7].actions[2].ir_protocol = RULE_IR_PROTOCOL_NEC;
+    config.rules[7].actions[2].ir_address = 0xabcd;
+    config.rules[7].actions[2].ir_command = 0xef01;
+    config.rules[7].actions[2].ir_carrier_hz = 38000;
+    config.rules[7].actions[2].ir_repeat_count = 5;
+    config.rules[7].actions[2].timeout_ms = 250;
+    config.rules[6].actions[2].type = RULE_ACTION_SPEAKER_TONE;
+    config.rules[6].actions[2].speaker_frequency_hz = 8000;
+    config.rules[6].actions[2].speaker_duration_ms = 5000;
+    config.rules[6].actions[2].speaker_volume_percent = 74;
+    config.rules[6].actions[2].timeout_ms = 1000;
+    config.rules[0].enabled = true;
+    rule_runtime_t runtime;
+    rule_config_store_t store;
+    rule_web_t web;
+    ASSERT_TRUE(rule_runtime_init(&runtime, &config));
+    ASSERT_TRUE(rule_config_store_open(&store));
+    ASSERT_TRUE(rule_web_start(&web, &runtime, &store));
+    char exported[32768], result[32768];
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_GET, "/api/config", NULL, exported, sizeof(exported)));
+    ASSERT_TRUE(strlen(exported) > 511);
+    ASSERT_TRUE(strstr(exported, "secret-") == NULL);
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config", exported, result, sizeof(result)));
+    ASSERT_TRUE(strstr(result, "\"error\"") == NULL);
+    ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
+    automation_config_t persisted;
+    ASSERT_TRUE(rule_config_store_load(&store, &persisted));
+    ASSERT_TRUE(memcmp(&config, &persisted, sizeof(config)) == 0);
+    ui_runtime_t ui;
+    ui_runtime_init(&ui);
+    ASSERT_TRUE(ui_runtime_load_automation(&ui, 0));
+    ASSERT_TRUE(ui_runtime_save_automation(&ui, 0));
+    ASSERT_TRUE(rule_config_store_load(&store, &persisted));
+    ASSERT_TRUE(memcmp(&config, &persisted, sizeof(config)) == 0);
+    const char *bad[] = {
+        "{\"source\":\"button.key1.short\",\"action\":\"speaker_tone\",\"speaker_volume_percent\":306}",
+        "{\"source\":\"button.key1.short\",\"source\":\"sound.clipped\",\"action\":\"local_ui\"}",
+        "{\"source\":\"button.key1.short\",\"action\":\"local_ui\",\"cooldown_ms\":100.5}",
+        "{\"source\":\"button.key1.short\",\"action\":\"local_ui\",\"name\":\"bad\\u0000name\"}",
+        "{\"rules\":[{\"id\":1},{\"id\":1}]}",
+        "{\"source\":\"button.key1.short\",\"action\":\"local_ui\"} trailing"
+    };
+    for (size_t i = 0; i < sizeof(bad)/sizeof(bad[0]); ++i) {
+        ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config", bad[i], result, sizeof(result)));
+        ASSERT_TRUE(strstr(result, "\"error\"") != NULL);
+        ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
+    }
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config",
+        "{\"source\":\"button.key1.short\",\"action\":\"http_post\",\"name\":\"sound_local_ui\"}", result, sizeof(result)));
+    ASSERT_TRUE(runtime.engine.config.rules[0].when.source == RULE_SOURCE_KEY1_SHORT);
+    ASSERT_EQ_U32(8, runtime.engine.config.rule_count);
+    ASSERT_EQ_U32(3, runtime.engine.config.rules[0].action_count);
+    rule_config_store_close(&store);
+    automation_config_t before = runtime.engine.config;
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config",
+        "{\"source\":\"button.key1.short\",\"action\":\"local_ui\",\"name\":\"unsaved\"}", result, sizeof(result)));
+    ASSERT_TRUE(strstr(result, "\"error\"") != NULL);
+    ASSERT_TRUE(memcmp(&before, &runtime.engine.config, sizeof(before)) == 0);
+
+    ASSERT_TRUE(strcmp(runtime.engine.config.rules[0].actions[0].http_bearer_token, "secret-0-0") == 0);
+    ASSERT_TRUE(rule_config_store_open(&store));
+    automation_config_set_defaults(&persisted);
+    persisted.rule_count = 0;
+    ASSERT_TRUE(rule_config_store_save(&store, &persisted));
+    ui_runtime_init(&ui);
+    ASSERT_TRUE(ui_runtime_save_automation(&ui, 1));
+    ASSERT_TRUE(rule_config_store_load(&store, &persisted));
+    ASSERT_EQ_U32(2, persisted.rule_count);
+    ASSERT_TRUE(automation_config_validate(&persisted, NULL, 0));
+    rule_web_stop(&web);
+    rule_config_store_close(&store);
+}
+
 static void test_config_edits_and_roundtrip_preserve_unedited_state(void)
 {
     automation_config_t config;
@@ -305,10 +399,10 @@ static void test_config_edits_and_roundtrip_preserve_unedited_state(void)
     ASSERT_TRUE(rule_runtime_init(&runtime, &config));
     ASSERT_TRUE(rule_config_store_open(&store));
     ASSERT_TRUE(rule_web_start(&web, &runtime, &store));
-    char exported[2048], response[16384];
+    char exported[32768], response[32768];
     ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_GET, "/api/config", NULL, exported, sizeof(exported)));
     ASSERT_TRUE(strstr(exported, "roundtrip-secret") == NULL);
-    ASSERT_TRUE(strstr(exported, "\"scope\":\"first_rule\"") != NULL);
+    ASSERT_TRUE(strstr(exported, "\"rules\":[") != NULL);
     ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config", exported, response, sizeof(response)));
     ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
     ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config",
@@ -386,12 +480,12 @@ static void test_export_fits_import_limit_and_oversize_requests_do_not_mutate(vo
     ASSERT_TRUE(rule_runtime_init(&runtime, &config));
     ASSERT_TRUE(rule_config_store_open(&store));
     ASSERT_TRUE(rule_web_start(&web, &runtime, &store));
-    char exported[2048], response[16384];
+    char exported[32768], response[32768];
     ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_GET, "/api/config", NULL, exported, sizeof(exported)));
     ASSERT_TRUE(strlen(exported) > 511);
     ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config", exported, response, sizeof(response)));
     ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
-    char oversized[2049];
+    char oversized[32769];
     memset(oversized, ' ', sizeof(oversized) - 1);
     oversized[sizeof(oversized) - 1] = '\0';
     ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config", oversized, response, sizeof(response)));
@@ -408,6 +502,7 @@ int main(void)
     test_gpio_digital_debounce_emits_safe_pin();
     test_disabled_hat_does_not_probe();
     test_rule_web_status();
+    test_complete_config_roundtrip_and_strict_parser();
     puts("external_triggers_and_web tests passed");
     return 0;
 }

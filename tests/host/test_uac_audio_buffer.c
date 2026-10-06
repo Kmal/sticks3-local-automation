@@ -1,6 +1,8 @@
 #include "uac_audio_buffer.h"
 
 #include <stdio.h>
+#include <pthread.h>
+#include <sched.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -43,8 +45,45 @@ static void test_overrun_and_silence_underrun(void)
     ASSERT_EQ(1, st.underruns);
 }
 
+
+#define CONCURRENT_BYTES 1000000u
+static uac_audio_buffer_t concurrent_buffer;
+static void *producer(void *ctx)
+{
+    (void)ctx;
+    for (unsigned i = 0; i < CONCURRENT_BYTES;) {
+        uint8_t byte = (uint8_t)i;
+        if (uac_audio_buffer_write(&concurrent_buffer, &byte, 1) == 1) ++i;
+        else sched_yield();
+    }
+    return NULL;
+}
+static void test_concurrent_pcm_integrity(void)
+{
+    uint8_t storage[127];
+    ASSERT_EQ(ESP_OK, uac_audio_buffer_init(&concurrent_buffer, storage, sizeof(storage)));
+    /* Exercise position overflow independently of non-power-of-two storage. */
+    atomic_store(&concurrent_buffer.read_position, UINT32_MAX - 99u);
+    atomic_store(&concurrent_buffer.write_position, UINT32_MAX - 99u);
+    pthread_t thread;
+    ASSERT_EQ(0, pthread_create(&thread, NULL, producer, NULL));
+    for (unsigned i = 0; i < CONCURRENT_BYTES;) {
+        uint8_t byte;
+        if (uac_audio_buffer_read(&concurrent_buffer, &byte, 1) == 1) {
+            ASSERT_EQ((uint8_t)i, byte);
+            ++i;
+        } else sched_yield();
+    }
+    ASSERT_EQ(0, pthread_join(thread, NULL));
+    uac_audio_buffer_stats_t stats = uac_audio_buffer_get_stats(&concurrent_buffer);
+    ASSERT_EQ(CONCURRENT_BYTES, stats.bytes_read);
+    ASSERT_EQ(CONCURRENT_BYTES, stats.bytes_written);
+    ASSERT_EQ(0, stats.used);
+}
+
 int main(void)
 {
+    test_concurrent_pcm_integrity();
     test_write_read_wrap_and_stats();
     test_overrun_and_silence_underrun();
     puts("uac_audio_buffer tests passed");

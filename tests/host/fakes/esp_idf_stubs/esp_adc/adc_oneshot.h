@@ -3,6 +3,7 @@
 typedef int adc_unit_t;
 typedef int adc_channel_t;
 typedef void *adc_oneshot_unit_handle_t;
+static inline esp_err_t adc_oneshot_del_unit(adc_oneshot_unit_handle_t unit) { (void)unit; return ESP_OK; }
 #define ADC_UNIT_1 1
 #define ADC_CHANNEL_3 3
 #define ADC_CHANNEL_4 4

@@ -3,35 +3,33 @@
 #include "sdkconfig.h"
 
 #include <stdio.h>
+#include <string.h>
 
+#ifndef CONFIG_APP_WIFI_ENABLE
+#define CONFIG_APP_WIFI_ENABLE 0
+#endif
+#ifndef CONFIG_APP_TRANSPORT_BLE_GATT_RULE_EVENTS
+#define CONFIG_APP_TRANSPORT_BLE_GATT_RULE_EVENTS 0
+#endif
 #ifndef CONFIG_APP_SOUND_LEVEL_TRIGGERS
 #define CONFIG_APP_SOUND_LEVEL_TRIGGERS 0
 #endif
-/* The production sdkconfig defaults compile hardware fact capabilities as
- * runtime-available by default. These fallbacks keep host tests and older
- * generated sdkconfig headers aligned unless a test explicitly overrides them. */
+/* Disabled ESP-IDF boolean options are absent from sdkconfig.h. Host defaults
+ * belong in the test sdkconfig fixture, never in production capability gates. */
 #ifndef CONFIG_APP_BATTERY_FACTS
-#ifdef CONFIG_APP_POWER_FACTS
-#define CONFIG_APP_BATTERY_FACTS CONFIG_APP_POWER_FACTS
-#else
-#define CONFIG_APP_BATTERY_FACTS 1
-#endif
+#define CONFIG_APP_BATTERY_FACTS 0
 #endif
 #ifndef CONFIG_APP_USB_POWER_FACTS
-#ifdef CONFIG_APP_POWER_FACTS
-#define CONFIG_APP_USB_POWER_FACTS CONFIG_APP_POWER_FACTS
-#else
-#define CONFIG_APP_USB_POWER_FACTS 1
-#endif
+#define CONFIG_APP_USB_POWER_FACTS 0
 #endif
 #ifndef CONFIG_APP_BMI270_FACTS
-#define CONFIG_APP_BMI270_FACTS 1
+#define CONFIG_APP_BMI270_FACTS 0
 #endif
 #ifndef CONFIG_APP_ADC_FACTS
-#define CONFIG_APP_ADC_FACTS 1
+#define CONFIG_APP_ADC_FACTS 0
 #endif
 #ifndef CONFIG_APP_SPEAKER_ACTION
-#define CONFIG_APP_SPEAKER_ACTION 1
+#define CONFIG_APP_SPEAKER_ACTION 0
 #endif
 
 static void set_error(char *error, size_t error_len, const char *message)
@@ -56,6 +54,18 @@ static bool profile_valid(rule_gpio_profile_t profile)
     return profile > RULE_GPIO_PROFILE_NONE && profile < RULE_GPIO_PROFILE_COUNT;
 }
 
+bool capability_adc_key_matches_pin(const char *key, int pin)
+{
+    static const char *keys[] = {"hat.g4", "hat.g5", "hat.g6", "hat.g7", "hat.g8", "grove.g9", "grove.g10"};
+    return key != NULL && pin >= 4 && pin <= 10 && (key[0] == '\0' || strcmp(key, keys[pin - 4]) == 0);
+}
+
+bool capability_adc_key_valid(const char *key)
+{
+    for (int pin = 4; pin <= 10; ++pin) if (capability_adc_key_matches_pin(key, pin)) return true;
+    return false;
+}
+
 typedef struct {
     rule_source_t source;
     const char *name;
@@ -77,8 +87,8 @@ static const source_capability_t s_source_caps[] = {
     {RULE_SOURCE_SOUND_CLIPPED, "sound.clipped", true, CONFIG_APP_SOUND_LEVEL_TRIGGERS, CONFIG_APP_SOUND_LEVEL_TRIGGERS ? "implemented" : "audio_capture_disabled"},
     {RULE_SOURCE_KEY1_SHORT, "button.key1.short", true, true, "implemented"},
     {RULE_SOURCE_KEY2_SHORT, "button.key2.short", true, true, "implemented"},
-    {RULE_SOURCE_BLE_CONNECTED, "ble.connected", true, true, "implemented"},
-    {RULE_SOURCE_WIFI_CONNECTED, "wifi.connected", true, true, "implemented"},
+    {RULE_SOURCE_BLE_CONNECTED, "ble.connected", true, CONFIG_APP_TRANSPORT_BLE_GATT_RULE_EVENTS, CONFIG_APP_TRANSPORT_BLE_GATT_RULE_EVENTS ? "implemented" : "ble_transport_disabled"},
+    {RULE_SOURCE_WIFI_CONNECTED, "wifi.connected", true, CONFIG_APP_WIFI_ENABLE, CONFIG_APP_WIFI_ENABLE ? "implemented" : "wifi_disabled"},
     {RULE_SOURCE_BATTERY_PERCENT, "power.battery_percent", true, CONFIG_APP_BATTERY_FACTS, CONFIG_APP_BATTERY_FACTS ? "implemented" : "battery_facts_disabled"},
     {RULE_SOURCE_POWER_USB_PRESENT, "power.usb_present", true, CONFIG_APP_USB_POWER_FACTS, CONFIG_APP_USB_POWER_FACTS ? "implemented" : "usb_power_facts_disabled"},
     {RULE_SOURCE_BMI270_MOTION, "bmi270.motion", true, CONFIG_APP_BMI270_FACTS, CONFIG_APP_BMI270_FACTS ? "implemented" : "bmi270_facts_disabled"},
@@ -101,7 +111,7 @@ static const source_capability_t s_source_caps[] = {
 };
 
 static const action_capability_t s_action_caps[] = {
-    {RULE_ACTION_BLE_MESSAGE, "ble_message", true, "implemented"},
+    {RULE_ACTION_BLE_MESSAGE, "ble_message", CONFIG_APP_TRANSPORT_BLE_GATT_RULE_EVENTS, CONFIG_APP_TRANSPORT_BLE_GATT_RULE_EVENTS ? "implemented" : "ble_transport_disabled"},
     {RULE_ACTION_HTTP_POST, "http_post", true, "implemented"},
     {RULE_ACTION_HAT_OPERATION, "hat_operation", false, "missing_hat_action_driver"},
     {RULE_ACTION_IR_SEND, "ir_send", true, "implemented"},

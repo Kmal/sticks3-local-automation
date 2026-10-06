@@ -15,6 +15,7 @@ typedef struct {
     bool enable_usb_power;
     bool enable_bmi270;
     bool enable_adc;
+    uint32_t adc_gpio_mask;
     uint32_t poll_interval_ms;
     board_power_config_t power;
     bmi270_motion_config_t motion;
@@ -45,6 +46,8 @@ hardware_fact_service_config_t hardware_fact_service_default_config(void);
 esp_err_t hardware_fact_service_init(hardware_fact_service_t *service,
                                      trigger_adapter_t *adapter,
                                      const hardware_fact_service_config_t *config);
+void hardware_fact_service_deinit(hardware_fact_service_t *service);
+void hardware_fact_service_config_for_rules(hardware_fact_service_config_t *out, const automation_config_t *rules);
 
 size_t hardware_fact_service_poll(hardware_fact_service_t *service,
                                   uint32_t uptime_ms);

@@ -46,12 +46,16 @@ def cmake_block_has_source(block: str, source: str) -> bool:
 def main() -> int:
     errors: list[str] = []
     main_text = strip_c_comments(MAIN.read_text(encoding="utf-8"))
-    sound_gate = "if (!app_sound_level_capture_needed(config))"
+    sound_gate = "if (!needed)"
     audio_init = "board_audio_init(&audio_config)"
     if audio_init not in main_text:
         errors.append("src/app/main.c must wire board_audio_init for demand-driven sound triggers")
     elif sound_gate not in main_text or main_text.index(sound_gate) > main_text.index(audio_init):
         errors.append("src/app/main.c must gate board_audio_init behind shared sound-capture demand")
+    if "app_sound_level_demand_capture_needed(&s_sound_level_demand)" not in main_text or "app_sound_level_sync(needed)" not in main_text:
+        errors.append("audio owner must consume a snapshot of shared capture demand")
+    if "s_audio_mutex" not in main_text or "sound_level_service_deinit(s_sound_level_service)" not in main_text:
+        errors.append("audio transitions and service teardown must be serialized")
     if "BOARD_AUDIO_PROFILE_CAPTURE_ONLY" not in main_text:
         errors.append("src/app/main.c must request the capture-only profile for sound triggers")
     if "board_audio_deinit" not in main_text:

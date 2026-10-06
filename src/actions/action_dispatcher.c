@@ -19,6 +19,17 @@ static action_result_t make_result(action_result_code_t code, const rule_event_t
 static void action_dispatcher_worker(void *arg);
 #endif
 
+static void set_last_result(action_dispatcher_t *dispatcher, action_result_t result)
+{
+#ifdef ESP_PLATFORM
+    portENTER_CRITICAL(&dispatcher->result_lock);
+#endif
+    dispatcher->last_result = result;
+#ifdef ESP_PLATFORM
+    portEXIT_CRITICAL(&dispatcher->result_lock);
+#endif
+}
+
 static action_result_t execute_event(action_dispatcher_t *dispatcher, const rule_event_t *event)
 {
     if (event == NULL) {
@@ -62,7 +73,10 @@ void action_dispatcher_init(action_dispatcher_t *dispatcher)
         return;
     }
     memset(dispatcher, 0, sizeof(*dispatcher));
-    dispatcher->last_result.code = ACTION_RESULT_NOT_STARTED;
+#ifdef ESP_PLATFORM
+    dispatcher->result_lock = (portMUX_TYPE)portMUX_INITIALIZER_UNLOCKED;
+#endif
+    set_last_result(dispatcher, make_result(ACTION_RESULT_NOT_STARTED, NULL));
 }
 
 bool action_dispatcher_start(action_dispatcher_t *dispatcher)
@@ -74,14 +88,14 @@ bool action_dispatcher_start(action_dispatcher_t *dispatcher)
 #ifdef ESP_PLATFORM
     dispatcher->queue_handle = xQueueCreate(ACTION_DISPATCHER_QUEUE_LEN, sizeof(action_job_t));
     if (dispatcher->queue_handle == NULL) {
-        dispatcher->last_result.code = ACTION_RESULT_QUEUE_FULL;
+        set_last_result(dispatcher, make_result(ACTION_RESULT_QUEUE_FULL, NULL));
         return false;
     }
     dispatcher->stop_requested = false;
     if (xTaskCreate(action_dispatcher_worker, "rule_action_worker", 4096, dispatcher, tskIDLE_PRIORITY + 1, &dispatcher->worker_task) != pdPASS) {
         vQueueDelete(dispatcher->queue_handle);
         dispatcher->queue_handle = NULL;
-        dispatcher->last_result.code = ACTION_RESULT_NOT_STARTED;
+        set_last_result(dispatcher, make_result(ACTION_RESULT_NOT_STARTED, NULL));
         return false;
     }
 #endif
@@ -139,23 +153,23 @@ bool action_enqueue_batch(action_dispatcher_t *dispatcher, const rule_event_batc
     if (dispatcher == NULL || batch == NULL || batch->event_count == 0 ||
         batch->event_count > RULE_MAX_ACTIONS_PER_RULE) {
         if (dispatcher != NULL) {
-            dispatcher->last_result = make_result(ACTION_RESULT_INVALID_ARG, NULL);
+            set_last_result(dispatcher, make_result(ACTION_RESULT_INVALID_ARG, NULL));
         }
         return false;
     }
     const rule_event_t *event = &batch->events[0];
     if (!dispatcher->started) {
-        dispatcher->last_result = make_result(ACTION_RESULT_NOT_STARTED, event);
+        set_last_result(dispatcher, make_result(ACTION_RESULT_NOT_STARTED, event));
         return false;
     }
 #ifdef ESP_PLATFORM
     if (dispatcher->queue_handle == NULL || xQueueSend(dispatcher->queue_handle, batch, 0) != pdPASS) {
-        dispatcher->last_result = make_result(ACTION_RESULT_QUEUE_FULL, event);
+        set_last_result(dispatcher, make_result(ACTION_RESULT_QUEUE_FULL, event));
         return false;
     }
 #else
     if (dispatcher->count >= ACTION_DISPATCHER_QUEUE_LEN) {
-        dispatcher->last_result = make_result(ACTION_RESULT_QUEUE_FULL, event);
+        set_last_result(dispatcher, make_result(ACTION_RESULT_QUEUE_FULL, event));
         return false;
     }
     dispatcher->queue[dispatcher->tail] = *batch;
@@ -169,7 +183,7 @@ bool action_enqueue(action_dispatcher_t *dispatcher, const rule_event_t *event)
 {
     if (event == NULL) {
         if (dispatcher != NULL) {
-            dispatcher->last_result = make_result(ACTION_RESULT_INVALID_ARG, NULL);
+            set_last_result(dispatcher, make_result(ACTION_RESULT_INVALID_ARG, NULL));
         }
         return false;
     }
@@ -181,7 +195,7 @@ bool action_enqueue(action_dispatcher_t *dispatcher, const rule_event_t *event)
 static size_t execute_job(action_dispatcher_t *dispatcher, const action_job_t *job)
 {
     for (size_t i = 0; i < job->event_count; ++i) {
-        dispatcher->last_result = execute_event(dispatcher, &job->events[i]);
+        set_last_result(dispatcher, execute_event(dispatcher, &job->events[i]));
     }
     return job->event_count;
 }
@@ -249,7 +263,15 @@ action_result_t action_dispatcher_get_last_result(const action_dispatcher_t *dis
     if (dispatcher == NULL) {
         return make_result(ACTION_RESULT_INVALID_ARG, NULL);
     }
-    return dispatcher->last_result;
+#ifdef ESP_PLATFORM
+    portMUX_TYPE *lock = (portMUX_TYPE *)&dispatcher->result_lock;
+    portENTER_CRITICAL(lock);
+#endif
+    const action_result_t result = dispatcher->last_result;
+#ifdef ESP_PLATFORM
+    portEXIT_CRITICAL(lock);
+#endif
+    return result;
 }
 
 

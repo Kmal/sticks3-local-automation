@@ -69,7 +69,10 @@ static void test_sound_level_service_status_json(void)
     ASSERT_TRUE(strstr(json, "audio_capture_disabled") != NULL);
 
     sound_level_service_t service;
-    memset(&service, 0, sizeof(service));
+    sound_level_service_config_t config;
+    rule_runtime_t runtime;
+    sound_level_service_config_defaults(&config);
+    ASSERT_TRUE(sound_level_service_init(&service, &runtime, (void *)1, &config));
     service.state = SOUND_LEVEL_SERVICE_RUNNING;
     service.last_metrics_valid = true;
     service.last_metrics.rms_dbfs_q8 = -4096;
@@ -84,6 +87,7 @@ static void test_sound_level_service_status_json(void)
     service.state = SOUND_LEVEL_SERVICE_ERROR;
     ASSERT_TRUE(sound_level_service_build_status_json(&service, json, sizeof(json)));
     ASSERT_TRUE(strstr(json, "\"state\":\"error\"") != NULL);
+    sound_level_service_deinit(&service);
 }
 
 static void test_sound_level_service_dropped_runtime_mutex_counter(void)

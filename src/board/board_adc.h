@@ -23,6 +23,7 @@ typedef struct {
     adc_oneshot_unit_handle_t adc1;
     void *cali_adc1;
     bool calibration_enabled;
+    uint32_t gpio_mask;
 } board_adc_context_t;
 
 typedef struct {
@@ -33,6 +34,8 @@ typedef struct {
 } board_adc_sample_t;
 
 esp_err_t board_adc_init(board_adc_context_t *ctx);
+esp_err_t board_adc_init_mask(board_adc_context_t *ctx, uint32_t gpio_mask);
+void board_adc_deinit(board_adc_context_t *ctx);
 const board_adc_channel_desc_t *board_adc_channels(size_t *out_count);
 esp_err_t board_adc_read_mv(board_adc_context_t *ctx,
                             const board_adc_channel_desc_t *channel,
