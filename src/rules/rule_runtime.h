@@ -25,6 +25,10 @@ typedef struct {
 
 bool rule_runtime_init(rule_runtime_t *runtime, const automation_config_t *config);
 bool rule_runtime_replace_config(rule_runtime_t *runtime, const automation_config_t *config);
+/* Prepare/validate before persistence; the engine changes only after commit succeeds. */
+typedef bool (*rule_config_commit_cb_t)(const automation_config_t *config, void *ctx);
+bool rule_runtime_replace_config_with_commit(rule_runtime_t *runtime, const automation_config_t *config,
+                                            rule_config_commit_cb_t commit, void *ctx);
 void rule_runtime_set_ble_sender(rule_runtime_t *runtime, action_dispatcher_send_cb_t cb, void *ctx);
 void rule_runtime_set_http_sender(rule_runtime_t *runtime, action_dispatcher_send_cb_t cb, void *ctx);
 void rule_runtime_set_ir_sender(rule_runtime_t *runtime, action_dispatcher_send_cb_t cb, void *ctx);

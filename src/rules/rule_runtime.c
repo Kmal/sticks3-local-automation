@@ -84,22 +84,30 @@ bool rule_runtime_init(rule_runtime_t *runtime, const automation_config_t *confi
     return true;
 }
 
-bool rule_runtime_replace_config(rule_runtime_t *runtime, const automation_config_t *config)
+bool rule_runtime_replace_config_with_commit(rule_runtime_t *runtime, const automation_config_t *config,
+                                            rule_config_commit_cb_t commit, void *ctx)
 {
-    if (runtime == NULL || config == NULL) {
+    if (runtime == NULL || config == NULL || !automation_config_validate(config, NULL, 0)) {
         return false;
     }
     trigger_gpio_t triggers[RULE_MAX_RULES];
     size_t count = 0;
-    if (!runtime_build_gpio_triggers(config, triggers, &count) || !rule_engine_replace_config(&runtime->engine, config)) {
+    if (!runtime_build_gpio_triggers(config, triggers, &count) || (commit != NULL && !commit(config, ctx))) {
         return false;
     }
+    /* Validation above guarantees this cannot fail for the prepared config. */
+    (void)rule_engine_replace_config(&runtime->engine, config);
     memset(runtime->gpio_triggers, 0, sizeof(runtime->gpio_triggers));
     if (count > 0) {
         memcpy(runtime->gpio_triggers, triggers, count * sizeof(triggers[0]));
     }
     runtime->gpio_trigger_count = count;
     return true;
+}
+
+bool rule_runtime_replace_config(rule_runtime_t *runtime, const automation_config_t *config)
+{
+    return rule_runtime_replace_config_with_commit(runtime, config, NULL, NULL);
 }
 
 void rule_runtime_set_ble_sender(rule_runtime_t *runtime, action_dispatcher_send_cb_t cb, void *ctx)
@@ -142,20 +150,24 @@ void rule_runtime_set_speaker_sender(rule_runtime_t *runtime, action_dispatcher_
     action_dispatcher_set_speaker_sender(&runtime->dispatcher, cb, ctx);
 }
 
+static bool runtime_enqueue_batch(const rule_event_batch_t *batch, void *ctx)
+{
+    rule_runtime_t *runtime = ctx;
+    if (!action_enqueue_batch(&runtime->dispatcher, batch)) {
+        runtime->enqueue_errors += batch->event_count;
+        return false;
+    }
+    return true;
+}
+
 size_t rule_runtime_process_fact(rule_runtime_t *runtime, const trigger_fact_t *fact)
 {
     if (runtime == NULL || fact == NULL) {
         return 0;
     }
-    rule_event_t events[RULE_MAX_ACTIONS_PER_RULE];
-    const size_t event_count = rule_engine_process_fact(&runtime->engine, fact, events, RULE_MAX_ACTIONS_PER_RULE);
-    runtime->last_event_count = event_count;
-    for (size_t i = 0; i < event_count; ++i) {
-        if (!action_enqueue(&runtime->dispatcher, &events[i])) {
-            runtime->enqueue_errors++;
-        }
-    }
-    return event_count;
+    runtime->last_event_count = rule_engine_process_fact_with_sink(&runtime->engine, fact,
+                                                                  runtime_enqueue_batch, runtime);
+    return runtime->last_event_count;
 }
 
 size_t rule_runtime_process_metrics(rule_runtime_t *runtime, const audio_level_metrics_t *metrics, uint32_t uptime_ms)

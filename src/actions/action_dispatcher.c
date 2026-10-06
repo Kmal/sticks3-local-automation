@@ -134,39 +134,59 @@ void action_dispatcher_set_speaker_sender(action_dispatcher_t *dispatcher, actio
     dispatcher->speaker_ctx = ctx;
 }
 
-bool action_enqueue(action_dispatcher_t *dispatcher, const rule_event_t *event)
+bool action_enqueue_batch(action_dispatcher_t *dispatcher, const rule_event_batch_t *batch)
 {
-    if (dispatcher == NULL || event == NULL) {
+    if (dispatcher == NULL || batch == NULL || batch->event_count == 0 ||
+        batch->event_count > RULE_MAX_ACTIONS_PER_RULE) {
         if (dispatcher != NULL) {
-            dispatcher->last_result = make_result(ACTION_RESULT_INVALID_ARG, event);
+            dispatcher->last_result = make_result(ACTION_RESULT_INVALID_ARG, NULL);
         }
         return false;
     }
+    const rule_event_t *event = &batch->events[0];
     if (!dispatcher->started) {
         dispatcher->last_result = make_result(ACTION_RESULT_NOT_STARTED, event);
         return false;
     }
 #ifdef ESP_PLATFORM
-    action_job_t job;
-    job.event = *event;
-    if (dispatcher->queue_handle == NULL || xQueueSend(dispatcher->queue_handle, &job, 0) != pdPASS) {
+    if (dispatcher->queue_handle == NULL || xQueueSend(dispatcher->queue_handle, batch, 0) != pdPASS) {
         dispatcher->last_result = make_result(ACTION_RESULT_QUEUE_FULL, event);
         return false;
     }
-    return true;
 #else
     if (dispatcher->count >= ACTION_DISPATCHER_QUEUE_LEN) {
         dispatcher->last_result = make_result(ACTION_RESULT_QUEUE_FULL, event);
         return false;
     }
-    dispatcher->queue[dispatcher->tail].event = *event;
+    dispatcher->queue[dispatcher->tail] = *batch;
     dispatcher->tail = (dispatcher->tail + 1u) % ACTION_DISPATCHER_QUEUE_LEN;
     dispatcher->count++;
-    return true;
 #endif
+    return true;
 }
 
-bool action_dispatcher_process_one(action_dispatcher_t *dispatcher)
+bool action_enqueue(action_dispatcher_t *dispatcher, const rule_event_t *event)
+{
+    if (event == NULL) {
+        if (dispatcher != NULL) {
+            dispatcher->last_result = make_result(ACTION_RESULT_INVALID_ARG, NULL);
+        }
+        return false;
+    }
+    rule_event_batch_t batch = {.event_count = 1};
+    batch.events[0] = *event;
+    return action_enqueue_batch(dispatcher, &batch);
+}
+
+static size_t execute_job(action_dispatcher_t *dispatcher, const action_job_t *job)
+{
+    for (size_t i = 0; i < job->event_count; ++i) {
+        dispatcher->last_result = execute_event(dispatcher, &job->events[i]);
+    }
+    return job->event_count;
+}
+
+static size_t process_job(action_dispatcher_t *dispatcher)
 {
 #ifdef ESP_PLATFORM
     action_job_t job;
@@ -174,8 +194,7 @@ bool action_dispatcher_process_one(action_dispatcher_t *dispatcher)
         xQueueReceive(dispatcher->queue_handle, &job, 0) != pdPASS) {
         return false;
     }
-    dispatcher->last_result = execute_event(dispatcher, &job.event);
-    return true;
+    return execute_job(dispatcher, &job);
 #else
     if (dispatcher == NULL || !dispatcher->started || dispatcher->count == 0) {
         return false;
@@ -183,16 +202,21 @@ bool action_dispatcher_process_one(action_dispatcher_t *dispatcher)
     action_job_t job = dispatcher->queue[dispatcher->head];
     dispatcher->head = (dispatcher->head + 1u) % ACTION_DISPATCHER_QUEUE_LEN;
     dispatcher->count--;
-    dispatcher->last_result = execute_event(dispatcher, &job.event);
-    return true;
+    return execute_job(dispatcher, &job);
 #endif
+}
+
+bool action_dispatcher_process_one(action_dispatcher_t *dispatcher)
+{
+    return process_job(dispatcher) > 0;
 }
 
 size_t action_dispatcher_process_all(action_dispatcher_t *dispatcher)
 {
     size_t processed = 0;
-    while (action_dispatcher_process_one(dispatcher)) {
-        ++processed;
+    size_t count;
+    while ((count = process_job(dispatcher)) > 0) {
+        processed += count;
     }
     return processed;
 }
@@ -236,7 +260,7 @@ static void action_dispatcher_worker(void *arg)
     action_job_t job;
     while (dispatcher != NULL && !dispatcher->stop_requested) {
         if (dispatcher->queue_handle != NULL && xQueueReceive(dispatcher->queue_handle, &job, portMAX_DELAY) == pdPASS) {
-            dispatcher->last_result = execute_event(dispatcher, &job.event);
+            (void)execute_job(dispatcher, &job);
         }
     }
     vTaskDelete(NULL);

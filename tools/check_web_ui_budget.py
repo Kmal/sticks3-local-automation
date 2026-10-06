@@ -13,7 +13,7 @@ WEBUI = ROOT / "webui"
 GENERATED = ROOT / "generated" / "webui_assets.c"
 
 KI_B = 1024
-MAX_BODY = 512
+MAX_BODY = 2048
 MAX_RESPONSE = 16 * KI_B
 MAX_URI_HANDLERS = 17
 STACK_SIZE = 8192

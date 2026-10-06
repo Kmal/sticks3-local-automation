@@ -280,8 +280,131 @@ static void test_rule_web_status(void)
     rule_config_store_close(&store);
 }
 
+static void test_config_edits_and_roundtrip_preserve_unedited_state(void)
+{
+    automation_config_t config;
+    automation_config_set_defaults(&config);
+    config.rules[0].enabled = true;
+    config.rules[0].when.source = RULE_SOURCE_KEY1_SHORT;
+    config.rules[0].when.threshold = rule_value_bool(true);
+    config.rules[0].when.comparator = RULE_COMPARATOR_EQ;
+    config.rules[0].when.sustain_ms = 0;
+    config.rules[0].cooldown_ms = 4321;
+    config.rules[0].action_count = 3;
+    config.rules[0].actions[0].type = RULE_ACTION_HTTP_POST;
+    config.rules[0].actions[0].timeout_ms = 3456;
+    snprintf(config.rules[0].actions[0].http_url, RULE_HTTP_URL_MAX, "https://example.invalid/hook");
+    snprintf(config.rules[0].actions[0].http_bearer_token, RULE_HTTP_AUTH_MAX, "roundtrip-secret");
+    config.rules[0].actions[1].type = RULE_ACTION_LOCAL_UI;
+    config.rules[0].actions[2].type = RULE_ACTION_LOCAL_UI;
+    config.rules[1].id = 99;
+    config.rules[0].name[0] = '\0';
+    rule_runtime_t runtime;
+    rule_config_store_t store;
+    rule_web_t web;
+    ASSERT_TRUE(rule_runtime_init(&runtime, &config));
+    ASSERT_TRUE(rule_config_store_open(&store));
+    ASSERT_TRUE(rule_web_start(&web, &runtime, &store));
+    char exported[2048], response[16384];
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_GET, "/api/config", NULL, exported, sizeof(exported)));
+    ASSERT_TRUE(strstr(exported, "roundtrip-secret") == NULL);
+    ASSERT_TRUE(strstr(exported, "\"scope\":\"first_rule\"") != NULL);
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config", exported, response, sizeof(response)));
+    ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config",
+        "{\"source\":\"button.key1.short\",\"action\":\"http_post\",\"name\":\"Edited name\"}", response, sizeof(response)));
+    snprintf(config.rules[0].name, RULE_NAME_MAX, "Edited name");
+    ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
+    automation_config_t saved;
+    ASSERT_TRUE(rule_config_store_load(&store, &saved));
+    ASSERT_TRUE(memcmp(&config, &saved, sizeof(config)) == 0);
+    rule_config_store_close(&store);
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config",
+        "{\"source\":\"button.key1.short\",\"action\":\"http_post\",\"name\":\"Failed save\"}", response, sizeof(response)));
+    ASSERT_TRUE(strstr(response, "config rejected") != NULL);
+    ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
+    ASSERT_TRUE(rule_config_store_open(&store));
+    ASSERT_TRUE(rule_config_store_load(&store, &saved));
+    ASSERT_TRUE(memcmp(&config, &saved, sizeof(config)) == 0);
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config",
+        "{\"source\":\"button.key1.short\",\"action\":\"http_post\",\"http_bearer_token\":\"\"}", response, sizeof(response)));
+    config.rules[0].actions[0].http_bearer_token[0] = '\0';
+    ASSERT_TRUE(runtime.engine.config.rules[0].actions[0].http_bearer_token[0] == '\0');
+    ASSERT_TRUE(memcmp(&config.rules[1], &runtime.engine.config.rules[1], sizeof(config.rules[1])) == 0);
+    rule_config_store_close(&store);
+}
+
+static void test_speaker_form_save_preserves_parameters_and_rejects_wrapped_volume(void)
+{
+    automation_config_t config;
+    automation_config_set_defaults(&config);
+    config.rules[0].when.source = RULE_SOURCE_KEY1_SHORT;
+    config.rules[0].when.threshold = rule_value_bool(true);
+    config.rules[0].when.comparator = RULE_COMPARATOR_EQ;
+    config.rules[0].when.sustain_ms = 0;
+    config.rules[0].actions[0].type = RULE_ACTION_SPEAKER_TONE;
+    config.rules[0].actions[0].speaker_frequency_hz = 1234;
+    config.rules[0].actions[0].speaker_duration_ms = 200;
+    config.rules[0].actions[0].speaker_volume_percent = 23;
+    config.rules[0].actions[0].timeout_ms = 300;
+    rule_runtime_t runtime;
+    rule_config_store_t store;
+    rule_web_t web;
+    ASSERT_TRUE(rule_runtime_init(&runtime, &config));
+    ASSERT_TRUE(rule_config_store_open(&store));
+    ASSERT_TRUE(rule_web_start(&web, &runtime, &store));
+    char response[16384];
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config",
+        "{\"source\":\"button.key1.short\",\"action\":\"speaker_tone\"}", response, sizeof(response)));
+    ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config",
+        "{\"source\":\"button.key1.short\",\"action\":\"speaker_tone\",\"speaker_volume_percent\":306}", response, sizeof(response)));
+    ASSERT_TRUE(strstr(response, "error") != NULL);
+    ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
+    rule_config_store_close(&store);
+}
+
+static void test_export_fits_import_limit_and_oversize_requests_do_not_mutate(void)
+{
+    automation_config_t config;
+    automation_config_set_defaults(&config);
+    config.rules[0].when.source = RULE_SOURCE_KEY1_SHORT;
+    config.rules[0].when.threshold = rule_value_bool(true);
+    config.rules[0].when.comparator = RULE_COMPARATOR_EQ;
+    config.rules[0].when.sustain_ms = 0;
+    config.rules[0].actions[0].type = RULE_ACTION_HTTP_POST;
+    config.rules[0].actions[0].timeout_ms = 1000;
+    memset(config.rules[0].name, 1, RULE_NAME_MAX - 1);
+    config.rules[0].name[RULE_NAME_MAX - 1] = '\0';
+    snprintf(config.rules[0].actions[0].http_url, RULE_HTTP_URL_MAX, "http://example.invalid/");
+    size_t used = strlen(config.rules[0].actions[0].http_url);
+    memset(config.rules[0].actions[0].http_url + used, '\"', RULE_HTTP_URL_MAX - 1 - used);
+    config.rules[0].actions[0].http_url[RULE_HTTP_URL_MAX - 1] = '\0';
+    rule_runtime_t runtime;
+    rule_config_store_t store;
+    rule_web_t web;
+    ASSERT_TRUE(rule_runtime_init(&runtime, &config));
+    ASSERT_TRUE(rule_config_store_open(&store));
+    ASSERT_TRUE(rule_web_start(&web, &runtime, &store));
+    char exported[2048], response[16384];
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_GET, "/api/config", NULL, exported, sizeof(exported)));
+    ASSERT_TRUE(strlen(exported) > 511);
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config", exported, response, sizeof(response)));
+    ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
+    char oversized[2049];
+    memset(oversized, ' ', sizeof(oversized) - 1);
+    oversized[sizeof(oversized) - 1] = '\0';
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config", oversized, response, sizeof(response)));
+    ASSERT_TRUE(strstr(response, "body too large") != NULL);
+    ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
+    rule_config_store_close(&store);
+}
+
 int main(void)
 {
+    test_config_edits_and_roundtrip_preserve_unedited_state();
+    test_speaker_form_save_preserves_parameters_and_rejects_wrapped_volume();
+    test_export_fits_import_limit_and_oversize_requests_do_not_mutate();
     test_gpio_digital_debounce_emits_safe_pin();
     test_disabled_hat_does_not_probe();
     test_rule_web_status();

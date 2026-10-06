@@ -17,6 +17,8 @@ fi
 mkdir -p "${BUILD_DIR}"
 python3 "${ROOT}/webui/build_webui.py" --check
 python3 "${ROOT}/tools/check_web_ui_budget.py"
+node "${ROOT}/tests/web/test_webui.js"
+python3 "${ROOT}/tests/tools/test_app_runtime_startup.py"
 compile() {
   local output="$1"
   shift

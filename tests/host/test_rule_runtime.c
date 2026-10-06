@@ -334,8 +334,100 @@ static void test_replace_config_rejects_invalid(void)
     ASSERT_EQ(0, rule_runtime_replace_config(&runtime, &config));
 }
 
+static void test_repeated_button_events_respect_cooldown(void)
+{
+    for (rule_source_t source = RULE_SOURCE_KEY1_SHORT; source <= RULE_SOURCE_KEY2_SHORT; ++source) {
+        automation_config_t config = runtime_config();
+        config.rules[0].when.source = source;
+        rule_runtime_t runtime;
+        int calls = 0;
+        ASSERT_TRUE(rule_runtime_init(&runtime, &config));
+        rule_runtime_set_local_ui_sender(&runtime, fake_runtime_local_ui_sender, &calls);
+        const button_state_event_t button = source == RULE_SOURCE_KEY1_SHORT
+            ? BUTTON_STATE_EVENT_KEY1_SHORT : BUTTON_STATE_EVENT_KEY2_SHORT;
+        (void)rule_runtime_process_button_event(&runtime, button, 0);
+        (void)rule_runtime_process_button_event(&runtime, button, 99);
+        ASSERT_EQ(1, calls);
+        (void)rule_runtime_process_button_event(&runtime, button, 100);
+        (void)rule_runtime_process_button_event(&runtime, button, 300);
+        ASSERT_EQ(3, calls);
+        ASSERT_EQ(3, runtime.engine.state[0].fire_count);
+    }
+}
+
+static uint32_t s_delivered_ids[RULE_MAX_RULES * RULE_MAX_ACTIONS_PER_RULE];
+static size_t s_delivered_count;
+static action_result_t capture_fanout(const rule_event_t *event, void *ctx)
+{
+    (void)ctx;
+    ASSERT_TRUE(s_delivered_count < RULE_MAX_RULES * RULE_MAX_ACTIONS_PER_RULE);
+    s_delivered_ids[s_delivered_count++] = event->rule_id;
+    ASSERT_EQ(s_delivered_count, event->sequence);
+    return (action_result_t){.code = ACTION_RESULT_OK, .sequence = event->sequence};
+}
+
+static void test_all_matching_rules_deliver_all_actions_in_order(void)
+{
+    automation_config_t config = runtime_config();
+    config.rule_count = RULE_MAX_RULES;
+    config.rules[0].action_count = RULE_MAX_ACTIONS_PER_RULE;
+    for (size_t j = 0; j < RULE_MAX_ACTIONS_PER_RULE; ++j) {
+        config.rules[0].actions[j].type = RULE_ACTION_LOCAL_UI;
+    }
+    for (size_t i = 1; i < RULE_MAX_RULES; ++i) {
+        config.rules[i] = config.rules[0];
+        config.rules[i].id += (uint32_t)i;
+    }
+    rule_runtime_t runtime;
+    ASSERT_TRUE(rule_runtime_init(&runtime, &config));
+    s_delivered_count = 0;
+    rule_runtime_set_local_ui_sender(&runtime, capture_fanout, NULL);
+    trigger_fact_t fact = {.source = RULE_SOURCE_KEY1_SHORT, .value = rule_value_bool(true), .uptime_ms = 100};
+    ASSERT_EQ(24, rule_runtime_process_fact(&runtime, &fact));
+    ASSERT_EQ(0, runtime.enqueue_errors);
+    ASSERT_EQ(24, rule_runtime_process_actions(&runtime));
+    ASSERT_EQ(24, s_delivered_count);
+    for (size_t i = 0; i < RULE_MAX_RULES; ++i) {
+        ASSERT_EQ(1, runtime.engine.state[i].fire_count);
+        for (size_t j = 0; j < RULE_MAX_ACTIONS_PER_RULE; ++j) {
+            ASSERT_EQ(config.rules[i].id, s_delivered_ids[i * RULE_MAX_ACTIONS_PER_RULE + j]);
+        }
+    }
+}
+
+static void test_queue_overflow_rejects_whole_rule_without_consuming_transition(void)
+{
+    automation_config_t config = runtime_config();
+    config.rules[0].when.source = RULE_SOURCE_WIFI_CONNECTED;
+    config.rules[0].action_count = 3;
+    for (size_t j = 0; j < 3; ++j) {
+        config.rules[0].actions[j].type = RULE_ACTION_LOCAL_UI;
+    }
+    rule_runtime_t runtime;
+    ASSERT_TRUE(rule_runtime_init(&runtime, &config));
+    rule_event_t old = {.action = RULE_ACTION_LOCAL_UI};
+    for (size_t i = 0; i < ACTION_DISPATCHER_QUEUE_LEN; ++i) {
+        ASSERT_TRUE(action_enqueue(&runtime.dispatcher, &old));
+    }
+    trigger_fact_t fact = {.source = RULE_SOURCE_WIFI_CONNECTED, .value = rule_value_bool(true), .uptime_ms = 100};
+    ASSERT_EQ(0, rule_runtime_process_fact(&runtime, &fact));
+    ASSERT_EQ(3, runtime.enqueue_errors);
+    ASSERT_EQ(ACTION_RESULT_QUEUE_FULL, rule_runtime_get_last_action_result(&runtime).code);
+    ASSERT_EQ(0, runtime.engine.state[0].fire_count);
+    ASSERT_TRUE(!runtime.engine.state[0].has_last_fire);
+    ASSERT_EQ(1, runtime.engine.next_event_sequence);
+    ASSERT_EQ(ACTION_DISPATCHER_QUEUE_LEN, rule_runtime_process_actions(&runtime));
+    fact.uptime_ms = 101;
+    ASSERT_EQ(3, rule_runtime_process_fact(&runtime, &fact));
+    ASSERT_EQ(1, runtime.engine.state[0].fire_count);
+    ASSERT_EQ(3, rule_runtime_process_actions(&runtime));
+}
+
 int main(void)
 {
+    test_repeated_button_events_respect_cooldown();
+    test_all_matching_rules_deliver_all_actions_in_order();
+    test_queue_overflow_rejects_whole_rule_without_consuming_transition();
     test_runtime_button_to_action_result();
     test_runtime_gpio_poll_to_action_result();
     test_runtime_ble_connected_fact_to_action_result();

@@ -80,6 +80,14 @@ The code-derived capability overlay is grouped by how the rule runtime uses each
 | Rule engine | ✅ Implemented/wired | Source matching, comparators, false-to-true transitions, sustain, cooldown, and action fan-out are active through the runtime. |
 | Audio board init / capture-only I2S / ES8311 | ✅ Implemented/wired by default | `CONFIG_APP_SOUND_LEVEL_TRIGGERS=y` links the audio sources and invokes the capture-only initializer; Kconfig can still disable it. |
 
+### Rule delivery and configuration correctness
+
+Short button presses are discrete events: each press rearms evaluation while preserving cooldown. The action queue admits all of one rule's actions as one job, with eight jobs covering an empty-queue burst of eight rules and up to 24 actions. When full, a job is rejected as a whole, `enqueue_errors` reports rejected actions, and the engine does not advance that rule's fire count, cooldown timestamp, or event sequence. A level source can retry on its next fact; a rejected button event requires another press. Rejected work is not retained in an unbounded backlog.
+
+The current Web UI edits the first rule and its first action. Ordinary saves and first-rule JSON round trips preserve other rules, additional actions, omitted timing/speaker settings, and omitted or masked HTTP credentials. An explicit empty token in JSON clears it. Exported JSON is a first-rule settings snapshot, not a portable backup of every rule or secret. The bounded request cap is 2,048 bytes so these snapshots fit the real HTTP import route. Explicit defaults/preset requests still replace the configuration. Validation and GPIO preparation precede persistence; the runtime is updated only after persistence succeeds.
+
+Startup reports an error unless the rule mutex, core runtime, and all required producer tasks start successfully. Partially created producer tasks and the action worker are stopped on task-allocation failure, and automation/Web UI work is blocked while startup is incomplete.
+
 ### BLE rule-event service
 
 The default transport is a custom Bluetooth LE GATT rule-event service advertised as `M5StickS3-Control`. It exposes service UUID `0xFFF0` with:
@@ -106,7 +114,7 @@ When enabled, the web server exposes a small local configuration UI at `/` plus 
 | `/api/status` | GET | Rule/web status, last action result, HTTP network readiness, and Wi-Fi status. |
 | `/api/time` | GET/POST | Read or update the configured timezone used by the status UI clock. |
 | `/api/capabilities` | GET | Supported/disabled trigger sources, actions, GPIO profiles, HAT placeholders, and pin-conflict classes. |
-| `/api/config` | GET/POST | Export/import the automation config, save it to NVS, and replace the running rule engine config. |
+| `/api/config` | GET/POST | Read/update first-rule settings, preserving other rules/actions and omitted fields; presets explicitly replace the config. |
 | `/api/wifi/status` | GET | Wi-Fi station/AP state, AP name, AP channel/max connections, and web URL. |
 | `/api/wifi/scan` | POST | Scan nearby Wi-Fi networks. |
 | `/api/wifi/connect` | POST | Connect and persist station credentials. |
