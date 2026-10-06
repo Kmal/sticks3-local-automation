@@ -29,9 +29,8 @@ typedef struct {
     rule_action_type_t action;
 } action_result_t;
 
-typedef struct {
-    rule_event_t event;
-} action_job_t;
+/* Eight whole-rule jobs hold a maximum of 24 actions without partial fan-out. */
+typedef rule_event_batch_t action_job_t;
 
 typedef action_result_t (*action_dispatcher_send_cb_t)(const rule_event_t *event, void *ctx);
 
@@ -68,6 +67,8 @@ void action_dispatcher_set_ir_sender(action_dispatcher_t *dispatcher, action_dis
 void action_dispatcher_set_local_ui_sender(action_dispatcher_t *dispatcher, action_dispatcher_send_cb_t cb, void *ctx);
 void action_dispatcher_set_speaker_sender(action_dispatcher_t *dispatcher, action_dispatcher_send_cb_t cb, void *ctx);
 bool action_enqueue(action_dispatcher_t *dispatcher, const rule_event_t *event);
+bool action_enqueue_batch(action_dispatcher_t *dispatcher, const rule_event_batch_t *batch);
+/* Process one whole-rule job; process_all returns the number of executed actions. */
 bool action_dispatcher_process_one(action_dispatcher_t *dispatcher);
 size_t action_dispatcher_process_all(action_dispatcher_t *dispatcher);
 void action_dispatcher_stop(action_dispatcher_t *dispatcher);

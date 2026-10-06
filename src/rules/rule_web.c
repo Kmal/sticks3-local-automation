@@ -11,11 +11,12 @@
 #include <stdio.h>
 #include <string.h>
 
+#define RULE_WEB_MAX_BODY 2048u
+
 #ifdef ESP_PLATFORM
 #include "esp_err.h"
 #include "esp_log.h"
 
-#define RULE_WEB_MAX_BODY 512u
 #define RULE_WEB_MAX_RESPONSE 16384u
 
 static const char *TAG = "RULE_WEB";
@@ -28,9 +29,14 @@ static esp_err_t rule_web_http_handler(httpd_req_t *req)
         return httpd_resp_send(req, (const char *)webui_index_html, (ssize_t)webui_index_html_len) == ESP_OK ? ESP_OK : ESP_FAIL;
     }
 
-    char *body = calloc(1, RULE_WEB_MAX_BODY);
+    if (req->method == HTTP_POST && req->content_len >= RULE_WEB_MAX_BODY) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body too large");
+        return ESP_FAIL;
+    }
+    const size_t body_capacity = req->method == HTTP_POST ? req->content_len + 1u : 0u;
+    char *body = body_capacity > 0 ? calloc(1, body_capacity) : NULL;
     char *response = malloc(RULE_WEB_MAX_RESPONSE);
-    if (body == NULL || response == NULL) {
+    if ((body_capacity > 0 && body == NULL) || response == NULL) {
         free(body);
         free(response);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "rule web allocation failed");
@@ -39,8 +45,8 @@ static esp_err_t rule_web_http_handler(httpd_req_t *req)
 
     if (req->method == HTTP_POST) {
         size_t received = 0;
-        while (received < req->content_len && received < RULE_WEB_MAX_BODY - 1u) {
-            int chunk = httpd_req_recv(req, body + received, (RULE_WEB_MAX_BODY - 1u) - received);
+        while (received < req->content_len) {
+            int chunk = httpd_req_recv(req, body + received, req->content_len - received);
             if (chunk <= 0) {
                 free(body);
                 free(response);
@@ -200,8 +206,8 @@ static bool rule_web_get_status_json_unlocked(const rule_web_t *web, char *out, 
     }
     action_result_t result = rule_runtime_get_last_action_result(web->runtime);
     const int written = snprintf(out, out_len,
-                                 "{\"started\":%s,\"last_action\":%d,\"capabilities_ready\":true,\"http_network_ready\":%s,\"wifi\":%s,\"sound\":%s}",
-                                 web->started ? "true" : "false", (int)result.code,
+                                 "{\"started\":%s,\"last_action\":%d,\"enqueue_errors\":%lu,\"capabilities_ready\":true,\"http_network_ready\":%s,\"wifi\":%s,\"sound\":%s}",
+                                 web->started ? "true" : "false", (int)result.code, (unsigned long)web->runtime->enqueue_errors,
                                  action_http_network_ready() ? "true" : "false", wifi, sound);
     return written > 0 && (size_t)written < out_len;
 }
@@ -398,20 +404,7 @@ static bool write_config_json(const automation_config_t *config, char *out, size
                            action != NULL ? (unsigned)action->speaker_volume_percent : 0u,
                            action != NULL ? (unsigned long)action->timeout_ms : 0ul) &&
               json_append_string(&cursor, &remaining, action != NULL ? action->http_url : "") &&
-              json_appendf(&cursor, &remaining, ",\"http_bearer_token\":\"%s\",\"rules\":[{\"id\":%lu,\"enabled\":%s,\"name\":",
-                           auth_state,
-                           rule != NULL ? (unsigned long)rule->id : 0ul,
-                           (rule != NULL && rule->enabled) ? "true" : "false") &&
-              json_append_string(&cursor, &remaining, rule != NULL ? rule->name : "") &&
-              json_appendf(&cursor, &remaining, ",\"source\":\"%s\",\"action\":\"%s\",\"http_bearer_token\":\"%s\","
-                           "\"speaker_frequency_hz\":%lu,\"speaker_duration_ms\":%lu,"
-                           "\"speaker_volume_percent\":%u}]}",
-                           rule != NULL ? rule_source_name(rule->when.source) : "invalid",
-                           action != NULL ? rule_action_name(action->type) : "invalid",
-                           auth_state,
-                           action != NULL ? (unsigned long)action->speaker_frequency_hz : 0ul,
-                           action != NULL ? (unsigned long)action->speaker_duration_ms : 0ul,
-                           action != NULL ? (unsigned)action->speaker_volume_percent : 0u);
+              json_appendf(&cursor, &remaining, ",\"http_bearer_token\":\"%s\",\"scope\":\"first_rule\"}", auth_state);
     if (!ok) {
         if (out_len > 0) {
             out[0] = '\0';
@@ -479,6 +472,31 @@ static bool json_get_string(const char *body, const char *key, char *out, size_t
                 decoded = '\t';
                 pos++;
                 break;
+            case 'u': {
+                /* The exporter uses \u00XX for ASCII control characters.
+                 * Reject embedded NUL and unsupported unicode escapes. */
+                unsigned value = 0;
+                pos++;
+                for (size_t i = 0; i < 4; ++i) {
+                    const char digit = *pos++;
+                    unsigned nibble;
+                    if (digit >= '0' && digit <= '9') {
+                        nibble = (unsigned)(digit - '0');
+                    } else if (digit >= 'a' && digit <= 'f') {
+                        nibble = (unsigned)(digit - 'a') + 10u;
+                    } else if (digit >= 'A' && digit <= 'F') {
+                        nibble = (unsigned)(digit - 'A') + 10u;
+                    } else {
+                        return false;
+                    }
+                    value = value * 16u + nibble;
+                }
+                if (value == 0 || value > 0x7fu) {
+                    return false;
+                }
+                decoded = (char)value;
+                break;
+            }
             default:
                 return false;
             }
@@ -707,25 +725,33 @@ static bool make_json_config(automation_config_t *config, const char *body)
         return false;
     }
 
-    automation_config_set_defaults(config);
+    if (config->rule_count == 0) {
+        automation_config_set_defaults(config);
+    }
     automation_rule_t *rule = &config->rules[0];
-    bool enabled = true;
+    const bool source_changed = rule->when.source != source;
+    const bool action_changed = rule->actions[0].type != action;
+    bool enabled = rule->enabled;
     (void)json_get_bool(body, "enabled", &enabled);
     rule->enabled = enabled;
-    rule->when.source = source;
-    rule->action_count = 1;
-    rule->actions[0].type = action;
-    rule->actions[0].timeout_ms = 1000;
-    rule->cooldown_ms = 1000;
-    if (source == RULE_SOURCE_SOUND_RMS_DBFS || source == RULE_SOURCE_SOUND_PEAK_DBFS) {
-        rule->when.comparator = RULE_COMPARATOR_GTE;
-        rule->when.threshold = rule_value_i32(-20 * 256);
-    } else if (source == RULE_SOURCE_SOUND_CLIPPED) {
-        rule->when.comparator = RULE_COMPARATOR_EQ;
-        rule->when.threshold = rule_value_bool(true);
-    } else {
-        rule->when.comparator = RULE_COMPARATOR_EQ;
-        rule->when.threshold = rule_value_bool(true);
+    if (action_changed) {
+        memset(&rule->actions[0], 0, sizeof(rule->actions[0]));
+        rule->actions[0].type = action;
+        rule->actions[0].timeout_ms = 1000;
+    }
+    if (source_changed) {
+        memset(&rule->when, 0, sizeof(rule->when));
+        rule->when.source = source;
+        if (source == RULE_SOURCE_SOUND_RMS_DBFS || source == RULE_SOURCE_SOUND_PEAK_DBFS) {
+            rule->when.comparator = RULE_COMPARATOR_GTE;
+            rule->when.threshold = rule_value_i32(-20 * 256);
+        } else if (source == RULE_SOURCE_SOUND_CLIPPED) {
+            rule->when.comparator = RULE_COMPARATOR_EQ;
+            rule->when.threshold = rule_value_bool(true);
+        } else {
+            rule->when.comparator = RULE_COMPARATOR_EQ;
+            rule->when.threshold = rule_value_bool(true);
+        }
     }
     char comparator_name_buf[16];
     rule_comparator_t parsed_comparator;
@@ -743,18 +769,18 @@ static bool make_json_config(automation_config_t *config, const char *body)
         rule->when.threshold = rule_value_bool(threshold_bool);
     }
     int32_t cooldown_ms = 0;
-    if (json_get_i32(body, "cooldown_ms", &cooldown_ms) && cooldown_ms > 0) {
+    if (json_get_i32(body, "cooldown_ms", &cooldown_ms) && cooldown_ms >= 0) {
         rule->cooldown_ms = (uint32_t)cooldown_ms;
     }
     int32_t sustain_ms = 0;
     if (json_get_i32(body, "sustain_ms", &sustain_ms) && sustain_ms >= 0) {
         rule->when.sustain_ms = (uint32_t)sustain_ms;
     }
-    (void)json_get_string(body, "name", rule->name, sizeof(rule->name));
-    if (rule->name[0] == '\0') {
-        (void)snprintf(rule->name, sizeof(rule->name), "Imported rule");
+    char name[RULE_NAME_MAX];
+    if (json_get_string(body, "name", name, sizeof(name))) {
+        (void)snprintf(rule->name, sizeof(rule->name), "%s", name);
     }
-    if (rule_source_is_gpio(source)) {
+    if (rule_source_is_gpio(source) && (source_changed || strstr(body, "\"gpio_pin\"") != NULL)) {
         if (!json_get_gpio_config(body, &rule->when.gpio)) {
             return false;
         }
@@ -762,27 +788,38 @@ static bool make_json_config(automation_config_t *config, const char *body)
                        rule_source_name(source), rule->when.gpio.pin);
     }
     if (action == RULE_ACTION_SPEAKER_TONE) {
-        int32_t frequency_hz = 7000;
-        int32_t duration_ms = 100;
-        int32_t volume_percent = 50;
-        int32_t timeout_ms = 100;
+        int32_t frequency_hz = action_changed ? 7000 : (int32_t)rule->actions[0].speaker_frequency_hz;
+        int32_t duration_ms = action_changed ? 100 : (int32_t)rule->actions[0].speaker_duration_ms;
+        int32_t volume_percent = action_changed ? 50 : rule->actions[0].speaker_volume_percent;
+        int32_t timeout_ms = action_changed ? 100 : (int32_t)rule->actions[0].timeout_ms;
         (void)json_get_i32(body, "speaker_frequency_hz", &frequency_hz);
         (void)json_get_i32(body, "speaker_duration_ms", &duration_ms);
         (void)json_get_i32(body, "speaker_volume_percent", &volume_percent);
         (void)json_get_i32(body, "action_timeout_ms", &timeout_ms);
+        if (volume_percent < 0 || volume_percent > (int32_t)RULE_SPEAKER_MAX_VOLUME_PERCENT) {
+            return false;
+        }
         rule->actions[0].speaker_frequency_hz = frequency_hz > 0 ? (uint32_t)frequency_hz : 0u;
         rule->actions[0].speaker_duration_ms = duration_ms > 0 ? (uint32_t)duration_ms : 0u;
         rule->actions[0].speaker_volume_percent = volume_percent > 0 ? (uint8_t)volume_percent : 0u;
         rule->actions[0].timeout_ms = timeout_ms > 0 ? (uint32_t)timeout_ms : 0u;
     }
     if (action == RULE_ACTION_HTTP_POST) {
-        if (!json_get_string(body, "http_url", rule->actions[0].http_url, sizeof(rule->actions[0].http_url))) {
+        char url[RULE_HTTP_URL_MAX];
+        if (json_get_string(body, "http_url", url, sizeof(url))) {
+            (void)snprintf(rule->actions[0].http_url, sizeof(rule->actions[0].http_url), "%s", url);
+        } else if (action_changed || strstr(body, "\"http_url\"") != NULL) {
             return false;
         }
         char token[RULE_HTTP_AUTH_MAX];
-        if (json_get_string(body, "http_bearer_token", token, sizeof(token)) && strcmp(token, "masked") != 0) {
+        if (json_get_string(body, "http_bearer_token", token, sizeof(token)) &&
+            strcmp(token, "masked") != 0 && strcmp(token, "empty") != 0) {
             (void)snprintf(rule->actions[0].http_bearer_token, sizeof(rule->actions[0].http_bearer_token), "%s", token);
         }
+    }
+    int32_t action_timeout_ms;
+    if (json_get_i32(body, "action_timeout_ms", &action_timeout_ms) && action_timeout_ms >= 0) {
+        rule->actions[0].timeout_ms = (uint32_t)action_timeout_ms;
     }
     return true;
 }
@@ -835,6 +872,11 @@ static const char *config_preset_from_body(const char *body)
         return "button_local_ui";
     }
     return NULL;
+}
+
+static bool commit_web_config(const automation_config_t *config, void *ctx)
+{
+    return rule_config_store_save((rule_config_store_t *)ctx, config);
 }
 
 static bool rule_web_handle_request_unlocked(rule_web_t *web, rule_web_method_t method, const char *path, const char *body, char *out, size_t out_len)
@@ -987,6 +1029,7 @@ static bool rule_web_handle_request_unlocked(rule_web_t *web, rule_web_method_t 
             const int written = snprintf(out, out_len, "{\"error\":\"config allocation failed\"}");
             return written > 0 && (size_t)written < out_len;
         }
+        *config = web->runtime->engine.config;
         const char *preset = config_preset_from_body(body);
         bool accepted = true;
         if (preset != NULL) {
@@ -997,7 +1040,7 @@ static bool rule_web_handle_request_unlocked(rule_web_t *web, rule_web_method_t 
             free(config);
             return written > 0 && (size_t)written < out_len;
         }
-        if (accepted && (!rule_config_store_save(web->store, config) || !rule_runtime_replace_config(web->runtime, config))) {
+        if (accepted && !rule_runtime_replace_config_with_commit(web->runtime, config, commit_web_config, web->store)) {
             const int written = snprintf(out, out_len, "{\"error\":\"config rejected\"}");
             free(config);
             return written > 0 && (size_t)written < out_len;
@@ -1070,6 +1113,13 @@ static bool rule_web_handle_request_unlocked(rule_web_t *web, rule_web_method_t 
 bool rule_web_handle_request(rule_web_t *web, rule_web_method_t method, const char *path,
                              const char *body, char *out, size_t out_len)
 {
+    if (web == NULL || path == NULL || out == NULL || out_len == 0) {
+        return false;
+    }
+    if (method == RULE_WEB_METHOD_POST && body != NULL && strlen(body) >= RULE_WEB_MAX_BODY) {
+        const int written = snprintf(out, out_len, "{\"ok\":false,\"error\":\"body too large\"}");
+        return written > 0 && (size_t)written < out_len;
+    }
     const bool touches_runtime = path != NULL &&
         (strcmp(path, "/api/status") == 0 || strcmp(path, "/api/config") == 0 ||
          strcmp(path, "/api/rules/test") == 0);

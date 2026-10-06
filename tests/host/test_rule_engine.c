@@ -114,8 +114,25 @@ static void test_cooldown_after_fire_at_zero(void)
     ASSERT_EQ(1, process_i32(&engine, RULE_SOURCE_SOUND_RMS_DBFS, 12, 100, events, 2));
 }
 
+static void test_full_buffer_still_updates_later_matching_rule_state(void)
+{
+    automation_config_t config = engine_config();
+    config.rule_count = 2;
+    config.rules[1] = config.rules[0];
+    config.rules[1].id = 43;
+    config.rules[0].when.comparator = RULE_COMPARATOR_LT;
+    rule_engine_t engine;
+    rule_event_t event;
+    ASSERT_TRUE(rule_engine_init(&engine, &config));
+    ASSERT_EQ(1, process_i32(&engine, RULE_SOURCE_SOUND_RMS_DBFS, 12, 100, &event, 1));
+    ASSERT_EQ(1, process_i32(&engine, RULE_SOURCE_SOUND_RMS_DBFS, 9, 200, &event, 1));
+    ASSERT_EQ(1, process_i32(&engine, RULE_SOURCE_SOUND_RMS_DBFS, 12, 300, &event, 1));
+    ASSERT_EQ(43, event.rule_id);
+}
+
 int main(void)
 {
+    test_full_buffer_still_updates_later_matching_rule_state();
     test_non_matching_fact_produces_no_events();
     test_transition_fires_once_until_false();
     test_sustain_and_cooldown();

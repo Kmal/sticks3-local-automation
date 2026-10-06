@@ -10,7 +10,7 @@ The current implementation is a **Phase 0 + Phase 1 foundation only**:
 - The previous monolithic `s_rule_setup_page` C string has been extracted into `webui/` source files.
 - `webui/build_webui.py` generates checked-in `generated/webui_assets.c` and `generated/webui_assets.h`.
 - The firmware serves `GET /` from the generated const asset without allocating the large API response buffer used by JSON routes.
-- Existing `/api/*` behavior is intended to remain unchanged while the service is enabled.
+- The correctness patch defines `/api/config` as a first-rule settings editor that preserves other rules/actions and omitted fields; presets remain explicit replacements.
 - The HTTP server lifecycle is on-demand: disabled after boot, enabled only by Web UI Wi-Fi/AP entry flows once connected, and stopped when the user exits the Web UI result/URL screens.
 - Short browser input/select fields are center-aligned for phone readability; larger textarea/status surfaces stay left-aligned.
 - Host validation checks generated-asset freshness and Web UI size budgets before running host tests.
@@ -34,7 +34,7 @@ The current implementation is a **Phase 0 + Phase 1 foundation only**:
 
 ## Review outcome
 
-The Phase 0/1 code review found no intentional API behavior changes. The remaining risk areas before later phases are:
+The extraction preserved API behavior. The subsequent correctness patch fixes config preservation, raises the bounded request cap to 2,048 bytes for snapshot round trips, removes redundant nested summaries, and adds safe SSID rendering. The remaining risk areas before later phases are:
 
 1. Hardware measurement is still required for true peak heap impact.
 2. The UI source files are extracted but still compact because Phase 1 preserved behavior rather than redesigning.

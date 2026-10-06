@@ -17,6 +17,14 @@ typedef struct {
     char rule_name[RULE_NAME_MAX];
 } rule_event_t;
 
+/* One rule's actions are admitted together, including under backpressure. */
+typedef struct {
+    size_t event_count;
+    rule_event_t events[RULE_MAX_ACTIONS_PER_RULE];
+} rule_event_batch_t;
+
+typedef bool (*rule_event_batch_sink_t)(const rule_event_batch_t *batch, void *ctx);
+
 typedef struct {
     automation_config_t config;
     struct {
@@ -33,4 +41,6 @@ typedef struct {
 bool rule_engine_init(rule_engine_t *engine, const automation_config_t *config);
 bool rule_engine_replace_config(rule_engine_t *engine, const automation_config_t *config);
 size_t rule_engine_process_fact(rule_engine_t *engine, const trigger_fact_t *fact, rule_event_t *events, size_t max_events);
+size_t rule_engine_process_fact_with_sink(rule_engine_t *engine, const trigger_fact_t *fact,
+                                         rule_event_batch_sink_t sink, void *ctx);
 const automation_rule_t *rule_engine_get_rule_by_id(const rule_engine_t *engine, uint32_t rule_id);

@@ -4,6 +4,7 @@
  */
 
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,7 +53,7 @@ static rule_runtime_t s_rule_runtime;
 static rule_config_store_t s_rule_store;
 static rule_web_t s_rule_web;
 static automation_config_t s_rule_config;
-static bool s_rule_runtime_ready;
+static atomic_bool s_rule_runtime_ready;
 static SemaphoreHandle_t s_rule_mutex;
 static TaskHandle_t s_rule_gpio_task;
 static TaskHandle_t s_rule_network_task;
@@ -233,6 +234,10 @@ static void app_rule_network_state_task(void *ctx)
 {
     (void)ctx;
     while (true) {
+        if (!s_rule_runtime_ready) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
         const bool ready = action_http_network_ready();
         const uint32_t uptime_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
         if (!s_rule_network_state_known || ready != s_rule_network_ready) {
@@ -262,6 +267,10 @@ static void app_rule_ble_state_task(void *ctx)
 {
     (void)ctx;
     while (true) {
+        if (!s_rule_runtime_ready) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
         const bool connected = transport_ble_gatt_is_connected();
         const uint32_t uptime_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
         if (!s_rule_ble_state_known || connected != s_rule_ble_connected) {
@@ -276,6 +285,9 @@ static void app_rule_ble_state_task(void *ctx)
 
 static void app_emit_button_rule_fact(button_state_event_t event)
 {
+    if (!s_rule_runtime_ready) {
+        return;
+    }
     const uint32_t uptime_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
     if (s_rule_mutex != NULL && xSemaphoreTake(s_rule_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         (void)rule_runtime_process_button_event(&s_rule_runtime, event, uptime_ms);
@@ -287,6 +299,10 @@ static void app_rule_gpio_poll_task(void *ctx)
 {
     (void)ctx;
     while (true) {
+        if (!s_rule_runtime_ready) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
         const uint32_t uptime_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
         if (s_rule_mutex != NULL && xSemaphoreTake(s_rule_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
             (void)rule_runtime_poll_gpio(&s_rule_runtime, uptime_ms);
@@ -297,7 +313,7 @@ static void app_rule_gpio_poll_task(void *ctx)
     }
 }
 
-static void app_rule_runtime_init(void)
+static bool app_rule_runtime_init(void)
 {
     ESP_LOGI(TAG, "rule runtime init: loading automation config");
     if (!rule_config_store_open(&s_rule_store) || !rule_config_store_load(&s_rule_store, &s_rule_config)) {
@@ -310,12 +326,17 @@ static void app_rule_runtime_init(void)
         s_rule_mutex = xSemaphoreCreateMutex();
         ESP_LOGI(TAG, "rule runtime init: mutex %s", s_rule_mutex != NULL ? "created" : "create failed");
     }
-    if (s_rule_mutex != NULL) {
-        (void)xSemaphoreTake(s_rule_mutex, portMAX_DELAY);
+    if (s_rule_mutex == NULL) {
+        ESP_LOGE(TAG, "rule runtime init: mutex allocation failed");
+        return false;
     }
-    (void)rule_runtime_init(&s_rule_runtime, &s_rule_config);
-    s_rule_runtime_ready = true;
-    ESP_LOGI(TAG, "rule runtime init: core runtime ready");
+    (void)xSemaphoreTake(s_rule_mutex, portMAX_DELAY);
+    if (!rule_runtime_init(&s_rule_runtime, &s_rule_config)) {
+        xSemaphoreGive(s_rule_mutex);
+        ESP_LOGE(TAG, "rule runtime init: core initialization failed");
+        return false;
+    }
+    ESP_LOGI(TAG, "rule runtime init: core initialized");
     rule_runtime_set_http_sender(&s_rule_runtime, app_send_http_rule_action, NULL);
     rule_runtime_set_ir_sender(&s_rule_runtime, app_send_ir_rule_action, NULL);
     rule_runtime_set_local_ui_sender(&s_rule_runtime, app_send_local_ui_rule_action, NULL);
@@ -332,20 +353,51 @@ static void app_rule_runtime_init(void)
     if (s_rule_gpio_task == NULL) {
         BaseType_t created = xTaskCreate(app_rule_gpio_poll_task, "rule_gpio_poll", 3072, NULL, tskIDLE_PRIORITY + 1, &s_rule_gpio_task);
         ESP_LOGI(TAG, "rule runtime init: gpio poll task %s", created == pdPASS ? "created" : "create failed");
+        if (created != pdPASS) {
+            goto task_failure;
+        }
     }
     if (s_rule_network_task == NULL) {
         BaseType_t created = xTaskCreate(app_rule_network_state_task, "rule_net_state", 3072, NULL, tskIDLE_PRIORITY + 1, &s_rule_network_task);
         ESP_LOGI(TAG, "rule runtime init: network state task %s", created == pdPASS ? "created" : "create failed");
+        if (created != pdPASS) {
+            goto task_failure;
+        }
     }
 #if CONFIG_APP_TRANSPORT_BLE_GATT_RULE_EVENTS
     if (s_rule_ble_task == NULL) {
         BaseType_t created = xTaskCreate(app_rule_ble_state_task, "rule_ble_state", 3072, NULL, tskIDLE_PRIORITY + 1, &s_rule_ble_task);
         ESP_LOGI(TAG, "rule runtime init: BLE state task %s", created == pdPASS ? "created" : "create failed");
+        if (created != pdPASS) {
+            goto task_failure;
+        }
     }
 #endif
+    s_rule_runtime_ready = true;
+    ESP_LOGI(TAG, "rule runtime init: core and producer tasks ready");
 #if CONFIG_APP_SOUND_LEVEL_TRIGGERS
     app_sound_level_sync(&s_rule_config);
 #endif
+    return true;
+
+task_failure:
+    if (s_rule_gpio_task != NULL) {
+        vTaskDelete(s_rule_gpio_task);
+        s_rule_gpio_task = NULL;
+    }
+    if (s_rule_network_task != NULL) {
+        vTaskDelete(s_rule_network_task);
+        s_rule_network_task = NULL;
+    }
+#if CONFIG_APP_TRANSPORT_BLE_GATT_RULE_EVENTS
+    if (s_rule_ble_task != NULL) {
+        vTaskDelete(s_rule_ble_task);
+        s_rule_ble_task = NULL;
+    }
+#endif
+    action_dispatcher_stop(&s_rule_runtime.dispatcher);
+    ESP_LOGE(TAG, "rule runtime init: producer task allocation failed; runtime stopped");
+    return false;
 }
 
 
@@ -583,6 +635,12 @@ static void app_rule_web_runtime_unlock(void *ctx)
  * the on-device Web UI flow has explicitly enabled the service. */
 static void app_web_ui_service_changed(bool enabled, void *ctx)
 {
+    if (enabled && !s_rule_runtime_ready) {
+        ESP_LOGE(TAG, "Web UI unavailable: automation runtime is not ready");
+        status_ui_set_state(STATUS_UI_STATE_ERROR);
+        return;
+    }
+
     (void)ctx;
     if (!s_rule_runtime_ready) {
         ESP_LOGW(TAG, "web UI service change ignored before rule runtime is ready: %s", enabled ? "enable" : "disable");
@@ -676,7 +734,11 @@ void app_main(void)
     } else {
         ESP_LOGW(TAG, "app_main: Wi-Fi/web UI network startup unavailable");
     }
-    app_rule_runtime_init();
+    if (!app_rule_runtime_init()) {
+        status_ui_set_state(STATUS_UI_STATE_ERROR);
+        ESP_LOGE(TAG, "Local automation failed to start; staying alive in error state");
+        app_idle_forever();
+    }
 
 #if CONFIG_APP_USB_UAC_DEVICE
     ESP_LOGI(TAG, "app_main: USB Audio Class init start");
