@@ -144,13 +144,26 @@ bool rule_web_start_locked(rule_web_t *web, rule_runtime_t *runtime, rule_config
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 17;
     config.stack_size = 8192;
-    ESP_LOGI(TAG, "starting HTTP server: port=%u max_uri_handlers=%u stack=%u",
+    /* Keep the stack internal: configuration handlers write NVS, which may
+     * disable the flash/PSRAM cache. Total free heap includes PSRAM and does
+     * not describe the memory available to create this task. */
+    config.task_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    ESP_LOGI(TAG, "starting HTTP server: port=%u max_uri_handlers=%u stack=%u internal_free=%u largest=%u minimum=%u psram_free=%u",
              (unsigned)config.server_port,
              (unsigned)config.max_uri_handlers,
-             (unsigned)config.stack_size);
+             (unsigned)config.stack_size,
+             (unsigned)heap_caps_get_free_size(config.task_caps),
+             (unsigned)heap_caps_get_largest_free_block(config.task_caps),
+             (unsigned)heap_caps_get_minimum_free_size(config.task_caps),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     esp_err_t err = httpd_start(&web->server, &config);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "HTTP server start failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "HTTP server start failed: %s stack=%u internal_free=%u largest=%u minimum=%u psram_free=%u",
+                 esp_err_to_name(err), (unsigned)config.stack_size,
+                 (unsigned)heap_caps_get_free_size(config.task_caps),
+                 (unsigned)heap_caps_get_largest_free_block(config.task_caps),
+                 (unsigned)heap_caps_get_minimum_free_size(config.task_caps),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
         return false;
     }
     ESP_LOGI(TAG, "HTTP server started");
