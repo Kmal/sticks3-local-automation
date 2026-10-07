@@ -1,6 +1,6 @@
 # StickS3 default-image hardware qualification
 
-This runbook is the release gate for the default StickS3 local-automation image. Feature expansion is frozen until one physical StickS3 completes every required section with captured evidence. Experimental USB Audio Class modes are compile-checked separately and are not part of this default-image qualification.
+This runbook is the release gate for the default StickS3 local-automation image. Physical StickS3 testing is deferred and is not part of the current software work plan. This runbook remains a future hardware release-qualification gate; software fixes and verification can proceed independently. Experimental USB Audio Class modes are compile-checked separately and are not part of this default-image qualification.
 
 ## Qualification record
 

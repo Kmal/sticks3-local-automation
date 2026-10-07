@@ -6,11 +6,11 @@ The default capture-only software profile is intentionally explicit when the sou
 
 - sample rate / LRCK: 16 kHz
 - fixed MCLK: 12.288 MHz on GPIO18
-- BCLK target: 512 kHz on GPIO17 for 16 kHz, 16-bit mono capture
+- BCLK target: 1.024 MHz on GPIO17 for 16 kHz, 16-bit mono payload in two 32-bit slots
 - LRCK/WS: GPIO15
 - ES8311 12.288 MHz / 16 kHz clock-manager register-2 value used by the current project sequence: `0x40`
 
-For the ESP-IDF v6 standard I2S channel API path, the driver uses a 768 × Fs MCLK multiple to generate the 12.288 MHz ES8311 master clock for 16 kHz audio and sets a 32-bit slot width for the physical BCLK target while reading DMA data as 16-bit samples according to `I2S_DATA_BIT_WIDTH_16BIT`. Hardware acceptance must measure GPIO18, GPIO17, and GPIO15 before claiming physical audio success. The default `CONFIG_APP_SOUND_LEVEL_TRIGGERS=y` build calls this initializer for capture-only microphone metrics.
+For the ESP-IDF v6 standard I2S channel API path, the driver uses a 768 × Fs MCLK multiple to generate the 12.288 MHz ES8311 master clock for 16 kHz audio and sets a 32-bit slot width in a two-slot standard I2S frame; mono selects one active slot but both slots contribute to BCLK while reading DMA data as 16-bit samples according to `I2S_DATA_BIT_WIDTH_16BIT`. Hardware acceptance must measure GPIO18, GPIO17, and GPIO15 before claiming physical audio success. The default `CONFIG_APP_SOUND_LEVEL_TRIGGERS=y` build calls this initializer for capture-only microphone metrics.
 
 ## Sound-level trigger reference review
 
@@ -31,3 +31,5 @@ Shared sound capture uses `BOARD_AUDIO_PROFILE_CAPTURE_ONLY` for both enabled `s
 - Firmware audio clock and capture implementation: ../../../src/audio/board_audio_clock.c
 - Firmware board audio initialization policy: ../../../src/audio/board_audio.c
 - Firmware USB Audio Class helper implementation: ../../../src/usb_audio/uac_config.c
+
+The BCLK expectation follows the [ESP-IDF v6.1 standard driver](https://github.com/espressif/esp-idf/blob/v6.1/components/esp_driver_i2s/i2s_std.c): `Fs × total_slot × slot_bits = 16000 × 2 × 32 = 1024000 Hz`. This is a source-derived expectation, not a physical measurement.

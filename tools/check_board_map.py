@@ -59,7 +59,7 @@ def main() -> int:
     errors += require(defines, "BOARD_I2C_SCL_IO", manifest["i2c"]["scl"])
     errors += require(defines, "BOARD_I2C_CLK_HZ", manifest["i2c"].get("clk_hz", 400000))
     errors += require(defines, "BOARD_I2S_MCLK_HZ", manifest["i2s"]["mclk_hz"])
-    errors += require(defines, "BOARD_I2S_BCLK_HZ", manifest["i2s"].get("bclk_hz", 512000))
+    errors += require(defines, "BOARD_I2S_BCLK_HZ", manifest["i2s"].get("bclk_hz", 1024000))
     errors += require(defines, "BOARD_I2S_SAMPLE_RATE", manifest["i2s"]["sample_rate_hz"])
     errors += require(defines, "BOARD_ES8311_ADDR", manifest["i2c"]["devices"]["es8311"])
     errors += require(defines, "BOARD_BMI270_ADDR", manifest["i2c"]["devices"]["bmi270"])

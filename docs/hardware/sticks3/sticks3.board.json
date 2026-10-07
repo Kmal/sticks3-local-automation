@@ -12,7 +12,7 @@
       "lrck": 15,
       "din": 16
     },
-    "bclk_hz": 512000,
+    "bclk_hz": 1024000,
     "lrck_hz": 16000,
     "profile": "default sound-level capture-only; speaker_tone uses playback-only TX when CONFIG_APP_SPEAKER_ACTION=y",
     "mclk_multiple": 768

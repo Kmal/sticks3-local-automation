@@ -15,7 +15,7 @@ DOCS = [ROOT / "docs" / "README.md", ROOT / "docs" / "hardware" / "sticks3" / "s
 EXPECTED = {
     "BOARD_I2S_SAMPLE_RATE": "16000",
     "BOARD_I2S_MCLK_HZ": "12288000",
-    "BOARD_I2S_BCLK_HZ": "512000",
+    "BOARD_I2S_BCLK_HZ": "1024000",
 }
 
 
@@ -26,6 +26,9 @@ def main() -> int:
         if not re.search(rf"#define\s+{name}\s+{value}\b", header):
             errors.append(f"{HEADER.relative_to(ROOT)} missing {name}={value}")
 
+    numeric = {name: int(value) for name, value in re.findall(r"#define\s+(BOARD_I2S_\w+)\s+(\d+)\b", header)}
+    if numeric.get("BOARD_I2S_BCLK_HZ") != numeric.get("BOARD_I2S_SAMPLE_RATE", 0) * numeric.get("BOARD_I2S_FRAME_SLOTS", 0) * numeric.get("BOARD_I2S_SLOT_BITS", 0):
+        errors.append("BCLK must equal sample rate * standard frame slots * slot bits")
     clock_text = CLOCK.read_text(encoding="utf-8")
     for needle in ["fixed_mclk_authoritative = true", "mclk_multiple_for_driver = 768", "0x40"]:
         if needle not in clock_text:

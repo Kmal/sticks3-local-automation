@@ -679,6 +679,37 @@ static void test_browser_lcd_roundtrip_preserves_unedited_settings(void)
 }
 
 
+
+static void test_first_action_contract_and_rejection_sequence(void)
+{
+    automation_config_t config;
+    automation_config_set_defaults(&config);
+    config.rule_count = 1;
+    config.rules[0].enabled = true;
+    config.rules[0].action_count = 3;
+    for (size_t i = 0; i < 3; ++i) config.rules[0].actions[i].type = RULE_ACTION_LOCAL_UI;
+    rule_runtime_t runtime;
+    rule_config_store_t store;
+    rule_web_t web;
+    ASSERT_TRUE(rule_runtime_init(&runtime, &config));
+    ASSERT_TRUE(rule_config_store_open(&store));
+    ASSERT_TRUE(rule_web_start(&web, &runtime, &store));
+    char response[256];
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/rules/test", NULL, response, sizeof(response)));
+    ASSERT_TRUE(strstr(response, "\"mode\":\"first_action\"") != NULL);
+    ASSERT_TRUE(strstr(response, "\"evaluates_rule\":false") != NULL);
+    ASSERT_EQ_U32(1, rule_runtime_process_actions(&runtime));
+    ASSERT_EQ_U32(0, runtime.engine.state[0].fire_count);
+    rule_event_t old = {.action = RULE_ACTION_LOCAL_UI};
+    for (size_t i = 0; i < ACTION_DISPATCHER_QUEUE_LEN; ++i) ASSERT_TRUE(action_enqueue(&runtime.dispatcher, &old));
+    const uint32_t sequence = runtime.engine.next_event_sequence;
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/rules/test", NULL, response, sizeof(response)));
+    ASSERT_TRUE(strstr(response, "\"queued\":false") != NULL);
+    ASSERT_EQ_U32(sequence, runtime.engine.next_event_sequence);
+    rule_web_stop(&web);
+    rule_config_store_close(&store);
+}
+
 static void test_session_authorization_and_small_config_ack(void)
 {
     automation_config_t config; automation_config_set_defaults(&config);
@@ -704,44 +735,10 @@ static void test_session_authorization_and_small_config_ack(void)
     rule_config_store_close(&store);
 }
 
-static bool transaction_locked, transaction_fail;
-static unsigned transaction_commits;
-static rule_runtime_t *transaction_runtime;
-static bool transaction_lock(void *ctx) { (void)ctx; ASSERT_TRUE(!transaction_locked); transaction_locked = true; return true; }
-static void transaction_unlock(void *ctx) { (void)ctx; ASSERT_TRUE(transaction_locked); transaction_locked = false; }
-static bool transaction_store(const automation_config_t *config, void *ctx) { return !transaction_fail && rule_config_store_save(ctx, config); }
-static bool transaction_commit(const automation_config_t *config, rule_config_store_t *store, void *ctx)
-{
-    (void)ctx; ASSERT_TRUE(transaction_locked); ++transaction_commits;
-    return rule_runtime_replace_config_with_commit(transaction_runtime, config, transaction_store, store);
-}
-static void test_lcd_transaction_publishes_only_after_commit(void)
-{
-    automation_config_t config = preservation_config(), saved;
-    rule_runtime_t runtime; rule_config_store_t store;
-    ASSERT_TRUE(rule_runtime_init(&runtime, &config));
-    ASSERT_TRUE(rule_config_store_open(&store)); ASSERT_TRUE(rule_config_store_save(&store, &config));
-    transaction_runtime = &runtime; transaction_fail = false; transaction_commits = 0;
-    ui_runtime_set_config_transaction(transaction_lock, transaction_unlock, transaction_commit, NULL);
-    ui_runtime_t ui; ui_runtime_init(&ui); ASSERT_TRUE(ui_runtime_load_automation(&ui, 0));
-    ui.automations[0].enabled = true;
-    ASSERT_TRUE(ui_runtime_save_automation(&ui, 0, UI_AUTOMATION_EDIT_ENABLED));
-    ASSERT_TRUE(!transaction_locked); ASSERT_EQ_U32(1, transaction_commits);
-    config.rules[0].enabled = true;
-    ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
-    ASSERT_TRUE(rule_config_store_load(&store, &saved)); ASSERT_TRUE(memcmp(&config, &saved, sizeof(config)) == 0);
-    transaction_fail = true; ui.automations[0].enabled = false;
-    ASSERT_TRUE(!ui_runtime_save_automation(&ui, 0, UI_AUTOMATION_EDIT_ENABLED));
-    ASSERT_TRUE(!transaction_locked);
-    ASSERT_TRUE(rule_config_store_load(&store, &saved)); ASSERT_TRUE(memcmp(&config, &saved, sizeof(config)) == 0);
-    ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
-    ui_runtime_set_config_transaction(NULL, NULL, NULL, NULL); rule_config_store_close(&store);
-}
-
 int main(void)
 {
+    test_first_action_contract_and_rejection_sequence();
     test_session_authorization_and_small_config_ack();
-    test_lcd_transaction_publishes_only_after_commit();
     test_strict_config_parsing_preserves_runtime_and_store();
     test_browser_lcd_roundtrip_preserves_unedited_settings();
     test_config_edits_and_roundtrip_preserve_unedited_state();

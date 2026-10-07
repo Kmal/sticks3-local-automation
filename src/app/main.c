@@ -72,6 +72,7 @@ static TaskHandle_t s_rule_ble_task;
 
 #if CONFIG_APP_SOUND_LEVEL_TRIGGERS
 static bool app_sound_level_status_json(char *out, size_t out_len, void *ctx);
+static void app_invalidate_sound_facts(void);
 static void app_sound_level_release_audio(void);
 static void app_sound_level_release_if_stopped(void);
 static bool app_sound_level_stop(void);
@@ -155,6 +156,7 @@ static action_result_t app_send_speaker_rule_action(const rule_event_t *event, v
         result.action = event->action;
     }
 #if CONFIG_APP_SOUND_LEVEL_TRIGGERS
+    app_invalidate_sound_facts();
     /* All codec transitions have the same owner lock. Never take the rule
      * mutex while holding this lock; capture may need it while stopping. */
     if (s_audio_mutex == NULL || xSemaphoreTake(s_audio_mutex, portMAX_DELAY) != pdTRUE) {
@@ -168,6 +170,7 @@ static action_result_t app_send_speaker_rule_action(const rule_event_t *event, v
     if (!capture_stopped || !action_speaker_send_event(event)) result.code = ACTION_RESULT_UNSUPPORTED;
 #if CONFIG_APP_SOUND_LEVEL_TRIGGERS
     xSemaphoreGive(s_audio_mutex);
+    app_invalidate_sound_facts();
     /* The demand manager restores capture after releasing the playback owner. */
 #endif
     return result;
@@ -391,6 +394,16 @@ static bool app_sound_level_status_json(char *out, size_t out_len, void *ctx)
     return ok;
 }
 
+static void app_invalidate_sound_facts(void)
+{
+    if (s_rule_mutex == NULL) return;
+    (void)xSemaphoreTake(s_rule_mutex, portMAX_DELAY);
+    rule_engine_invalidate_source(&s_rule_runtime.engine, RULE_SOURCE_SOUND_RMS_DBFS);
+    rule_engine_invalidate_source(&s_rule_runtime.engine, RULE_SOURCE_SOUND_PEAK_DBFS);
+    rule_engine_invalidate_source(&s_rule_runtime.engine, RULE_SOURCE_SOUND_CLIPPED);
+    xSemaphoreGive(s_rule_mutex);
+}
+
 static void app_sound_manager(void *ctx)
 {
     (void)ctx;
@@ -400,9 +413,11 @@ static void app_sound_manager(void *ctx)
         app_sound_level_demand_update_trigger(&s_sound_level_demand, &s_rule_config);
         const bool needed = app_sound_level_demand_capture_needed(&s_sound_level_demand);
         xSemaphoreGive(s_rule_mutex);
+        if (!needed) app_invalidate_sound_facts();
         (void)xSemaphoreTake(s_audio_mutex, portMAX_DELAY);
         app_sound_level_sync(needed);
         xSemaphoreGive(s_audio_mutex);
+        if (!needed) app_invalidate_sound_facts();
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
@@ -541,19 +556,33 @@ static void key2_pressed_cb(void *ctx)
     app_emit_button_rule_fact(BUTTON_STATE_EVENT_KEY2_SHORT);
 }
 
-static bool app_commit_stored_config(const automation_config_t *config, void *ctx)
+static bool app_ui_load_automation(automation_config_t *out, void *ctx)
+{
+    (void)ctx;
+    if (!s_rule_runtime_ready || s_rule_mutex == NULL) return false;
+    if (xSemaphoreTake(s_rule_mutex, portMAX_DELAY) != pdTRUE) return false;
+    *out = s_rule_runtime.engine.config;
+    xSemaphoreGive(s_rule_mutex);
+    return true;
+}
+
+static bool app_commit_automation(const automation_config_t *config, void *ctx)
 {
     return rule_config_store_save((rule_config_store_t *)ctx, config);
 }
 
-/* Caller holds s_rule_mutex across load, edit, preparation and commit. */
-static bool app_lcd_config_commit(const automation_config_t *config, rule_config_store_t *store, void *ctx)
+static bool app_ui_save_automation(automation_config_t *out, uint8_t index,
+                                    const ui_automation_state_t *slot, ui_automation_edit_t edit, void *ctx)
 {
     (void)ctx;
-    if (!s_rule_runtime_ready || !rule_runtime_replace_config_with_commit(
-            &s_rule_runtime, config, app_commit_stored_config, store)) return false;
-    s_rule_config = *config;
-    return true;
+    if (!s_rule_runtime_ready || s_rule_mutex == NULL) return false;
+    if (xSemaphoreTake(s_rule_mutex, portMAX_DELAY) != pdTRUE) return false;
+    *out = s_rule_runtime.engine.config;
+    const bool ok = ui_automation_apply_edit(out, index, slot, edit) &&
+        rule_runtime_replace_config_with_commit(&s_rule_runtime, out, app_commit_automation, &s_rule_store);
+    if (ok) s_rule_config = *out;
+    xSemaphoreGive(s_rule_mutex);
+    return ok;
 }
 
 static void app_rule_web_config_changed_cb(const automation_config_t *config, void *ctx)
@@ -652,7 +681,6 @@ void app_main(void)
     const status_ui_button_handlers_t status_handlers = {
         .key1_pressed = key1_pressed_cb,
         .key2_pressed = key2_pressed_cb,
-        .automation_config_changed = NULL,
         .service_enabled_changed = app_web_ui_service_changed,
     };
 
@@ -669,6 +697,7 @@ void app_main(void)
     ESP_ERROR_CHECK(app_network_stack_init());
 
     ESP_LOGI(TAG, "app_main: status UI init start");
+    ui_model_set_automation_backend(app_ui_load_automation, app_ui_save_automation, NULL);
     ESP_ERROR_CHECK(status_ui_init(&status_handlers));
     status_ui_set_state(STATUS_UI_STATE_BOOTING);
 
@@ -682,8 +711,6 @@ void app_main(void)
         app_idle_forever();
     }
 
-    ui_runtime_set_config_transaction(app_rule_web_runtime_lock, app_rule_web_runtime_unlock,
-                                      app_lcd_config_commit, s_rule_mutex);
 
 #if CONFIG_APP_USB_UAC_DEVICE
     ESP_LOGI(TAG, "app_main: USB Audio Class init start");

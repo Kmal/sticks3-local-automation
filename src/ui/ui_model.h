@@ -2,7 +2,6 @@
 
 #include "app_wifi.h"
 #include "rule_types.h"
-#include "rule_config_store.h"
 #include "ui_nav.h"
 
 #include <stdbool.h>
@@ -109,12 +108,13 @@ typedef enum {
     UI_AUTOMATION_EDIT_ACTION,
 } ui_automation_edit_t;
 
-typedef bool (*ui_config_lock_cb_t)(void *ctx);
-typedef void (*ui_config_unlock_cb_t)(void *ctx);
-typedef bool (*ui_config_commit_cb_t)(const automation_config_t *config, rule_config_store_t *store, void *ctx);
-/* Production installs the SAME transaction lock and commit path as Web UI. */
-void ui_runtime_set_config_transaction(ui_config_lock_cb_t lock, ui_config_unlock_cb_t unlock,
-                                       ui_config_commit_cb_t commit, void *ctx);
-
-/* Apply only the selected field to the latest stored configuration. */
+/* The application backend owns the runtime lock and persistence transaction.
+ * Register before starting UI tasks; never replace it while those tasks run. */
+typedef bool (*ui_automation_load_cb_t)(automation_config_t *out, void *ctx);
+typedef bool (*ui_automation_save_cb_t)(automation_config_t *out, uint8_t index,
+                                      const ui_automation_state_t *slot, ui_automation_edit_t edit, void *ctx);
+void ui_model_set_automation_backend(ui_automation_load_cb_t load, ui_automation_save_cb_t save, void *ctx);
+bool ui_automation_apply_edit(automation_config_t *config, uint8_t index,
+                              const ui_automation_state_t *slot, ui_automation_edit_t edit);
+/* Apply only the selected field to the current runtime configuration. */
 bool ui_runtime_save_automation(ui_runtime_t *ui, uint8_t automation_index, ui_automation_edit_t edit);

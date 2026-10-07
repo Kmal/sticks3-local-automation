@@ -34,6 +34,11 @@ document.getElementById('http_bearer_token').value = 'replacement';
 assert.equal(JSON.parse(vm.runInContext('body()', context)).http_bearer_token, 'replacement');
 console.log('webui rendering and credential tests passed');
 
+const html = fs.readFileSync(path.join(__dirname, "../../webui/index.html"), "utf8");
+assert(html.includes("Test first action"));
+assert(html.includes("Runs the saved first action; ignores trigger and timing"));
+assert(!html.includes("Test First Rule"));
+
 (async () => {
   let requests = [];
   context.fetch = async (url, options) => {

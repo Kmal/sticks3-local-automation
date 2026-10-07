@@ -82,9 +82,9 @@ The code-derived capability overlay is grouped by how the rule runtime uses each
 
 ### Rule delivery and configuration correctness
 
-Short button presses are discrete events: each press rearms evaluation while preserving cooldown. Each action queue admits all of one rule's actions as one job, with eight jobs covering an empty-queue burst of eight rules and up to 24 actions. Local-only rules use a local worker; any rule containing HTTP uses a separate network worker, preserving ordering within that rule. Hardware callbacks are serialized across workers without holding their mutex during HTTP. Ordering across the two lanes is not guaranteed. When full, a job is rejected as a whole, `enqueue_errors` reports rejected actions, and the engine does not advance that rule's fire count, cooldown timestamp, or event sequence. A level source can retry on its next fact; a rejected button event requires another press. Rejected work is not retained in an unbounded backlog.
+Short button presses are discrete events: each press rearms evaluation while preserving cooldown. Each action queue admits all of one rule's actions as one job, with eight jobs covering an empty-queue burst of eight rules and up to 24 actions. Local-only rules use a local worker; any rule containing HTTP uses a separate network worker, preserving ordering within that rule. Hardware callbacks are serialized across workers without holding their mutex during HTTP. Ordering across the two lanes is not guaranteed. When full, a job is rejected as a whole, `enqueue_errors` reports rejected actions, and the engine does not advance that rule's fire count, cooldown timestamp, or event sequence. A level source can retry on its next fact; rejected button and GPIO-edge events are discarded and require a new event. Rejected work is not retained in an unbounded backlog.
 
-The current Web UI edits the first rule and its first action. Ordinary saves and configuration JSON round trips preserve other rules, additional actions, omitted timing/speaker settings, and omitted or masked HTTP credentials. An explicit empty token in JSON clears it. Exported JSON is a complete rule/action snapshot with masked secrets. The bounded request cap is 32,768 bytes so these snapshots fit the real HTTP import route. Explicit defaults/preset requests still replace the configuration. Validation and GPIO preparation precede persistence; the runtime is updated only after persistence succeeds. LCD edits use the same transaction mutex and commit path as web edits. A successful config POST returns `{"ok":true}`; clients fetch the resulting snapshot separately with GET.
+The current Web UI edits the first rule and its first action. Ordinary saves and configuration JSON round trips preserve other rules, additional actions, omitted timing/speaker settings, and omitted or masked HTTP credentials. An explicit empty token in JSON clears it. Exported JSON is a complete rule/action snapshot with masked secrets. The bounded request cap is 32,768 bytes so these snapshots fit the real HTTP import route. Explicit defaults/preset requests still replace the configuration. Validation and GPIO preparation precede persistence; the runtime is updated only after persistence succeeds. LCD edits use the same runtime mutex and prepare/commit/publish transaction as Web edits, applying only the chosen field to the latest runtime configuration; there is no later NVS reload callback. A successful config POST returns `{"ok":true}`; clients fetch the resulting snapshot separately with GET.
 
 Startup reports an error unless the rule mutex, core runtime, and all required producer tasks start successfully. Partially created producer tasks and the action worker are stopped on task-allocation failure, and automation/Web UI work is blocked while startup is incomplete.
 
@@ -121,7 +121,7 @@ When enabled, the web server exposes a small local configuration UI at `/` plus 
 | `/api/wifi/forget` | POST | Forget saved station credentials. |
 | `/api/wifi/ap` | POST | Start AP mode with a configurable AP name, required WPA2 password (8–63 characters), and channel. |
 | `/api/wifi/mode` | POST | Select Wi-Fi, AP, AP+Wi-Fi, or off mode. |
-| `/api/rules/test` | POST | Inject a test fact through the current rule runtime. |
+| `/api/rules/test` | POST | Test the first action of rule zero, only when enabled; explicitly reports `mode:first_action` and does not evaluate rule conditions or fan-out. |
 | `/api/gpio/test` | POST | Validate a candidate GPIO rule/config against safe-pin rules. |
 | `/api/hat/probe` | POST | Fail-closed HAT capability probe placeholder; HAT drivers are not enabled yet. |
 
@@ -251,15 +251,12 @@ Currently supported actions are `ble_message`, `http_post`, `ir_send`, and `loca
 
 ## What is planned next
 
-Feature expansion is frozen until the default image passes the measured qualification gate in `docs/hardware_qualification.md`. New HAT integrations, GPIO pulse/frequency sources, Web UI feature phases, and UAC productization must not displace qualification work or be presented as release-ready before that gate is complete.
+Physical StickS3 testing is deferred and outside the current software plan. `docs/hardware_qualification.md` remains the future gate for hardware/release claims.
 
-1. Run the full ESP-IDF hardware qualification on a real StickS3: boot, BLE telemetry, Wi-Fi setup, web UI, NVS save/reload, GPIO fixture tests, IR frame tests, oscilloscope/logic-analyzer audio clock checks, heap/stack measurements, and evidence capture using `docs/hardware_qualification.md`.
-2. Improve the web rule editor beyond the current compact setup page and JSON import/export flow.
-3. Add authenticated or local-only deployment guidance for the web UI before treating it as a user-facing network service.
-4. Implement and validate more external sources only after hardware routes are verified: GPIO pulse/frequency and selected M5Stack HAT sensors. Battery percent, USB/external-power present, BMI270 motion, and safe ADC1 paths are enabled in the default firmware through separate Kconfig gates, but still require hardware bench validation before release claims.
-5. Implement HAT actions only with source-backed protocols and tests.
-6. Bench-validate the Kconfig-gated `speaker_tone` action on StickS3 hardware, including M5PM1 PYG3 amplifier enable/disable, I2S `G14_I2S_DDAC` output, and restoration of demand-driven microphone capture after playback.
-7. Revisit whether the product needs to qualify and ship the experimental USB Audio Class implementation; BLE Audio class-device support is not planned for the current ESP32-S3 StickS3 target, and until UAC is hardware-qualified this firmware should be described as a custom BLE rule-event and local automation device, not an OS-native audio endpoint.
+1. Complete software regression and ESP-IDF build verification for configuration transactions, pulse rejection, sampled-fact freshness, audio clock expectations, and the explicitly labeled first-action test.
+2. Add bounded multi-rule configuration operations and conflict handling before expanding the Web UI editor.
+3. Improve the rule editor within its asset, allocation, route and polling budgets.
+4. Keep HAT integrations, GPIO pulse/frequency sources, and UAC productization separate from these correctness fixes; hardware behavior remains unqualified.
 
 ## Automation implementation status
 
@@ -304,7 +301,7 @@ Before claiming end-to-end hardware validation, run these checks on a real Stick
 | IR send action | Configure a NEC IR action, trigger `/api/rules/test`, and confirm a matching NEC frame on an IR receiver or logic analyzer. |
 | GPIO trigger | Configure a safe GPIO digital/edge rule on a validated pin, toggle the input after debounce, and confirm exactly one normalized GPIO fact fires the action. |
 | Fail-closed HAT probe | Call `/api/hat/probe` for unsupported HAT sources and confirm the response remains unsupported until a real HAT driver is implemented. |
-| Audio clocks | Measure GPIO18 fixed MCLK at 12.288 MHz, GPIO17 BCLK at the documented 512 kHz target, and GPIO15 LRCK at 16 kHz. |
+| Audio clocks | Measure GPIO18 fixed MCLK at 12.288 MHz, GPIO17 BCLK at the documented 1.024 MHz target, and GPIO15 LRCK at 16 kHz. |
 | Capture-only safety | Confirm default capture boot does not drive I2S TX, unmute the ES8311 DAC, or enable the speaker amplifier unless a `speaker_tone` action is actively running. |
 | Speaker action | Configure `speaker_tone` at 7000 Hz / 100 ms / 50% volume, trigger it, and confirm GPIO14 (`G14_I2S_DDAC`) activity, M5PM1 PYG3 high only during playback, PYG3 low after completion, and sound-level capture restart when still demanded. |
 
@@ -401,5 +398,13 @@ ESP-IDF build/flash validation still requires an ESP-IDF environment and attache
 Global sensor-monitoring rule: firmware must initialize and monitor a sensor only while an explicit demand source needs it. For GPIO this is enabled-rule source usage; for sound capture this is the union of enabled `sound.*` automation rules and Web UI telemetry. If neither trigger nor telemetry demand is active, the producer must stay stopped and release its runtime RAM/task resources. Future sensor producers should keep demand sources explicit and avoid duplicate readers.
 
 Runtime capture starts only while shared demand is active. Sound-level triggers are enabled in the checked-in defaults with `CONFIG_APP_SOUND_LEVEL_TRIGGERS=y`. This links `audio_metrics.c`, `board_audio.c`, `board_audio_clock.c`, `board_audio_power.c`, `board_i2s.c`, `es8311.c`, and `sound_level_service.c`. To honor demand-driven sensor monitoring, the firmware allocates the sound service state and initializes the StickS3 ES8311 microphone path with `BOARD_AUDIO_PROFILE_CAPTURE_ONLY` only while shared sound demand is active. Enabled `sound.*` rules consume live `sound.rms_dbfs`, `sound.peak_dbfs`, and `sound.clipped` facts through the existing automation runtime, and Web UI telemetry reads the same service status/last-metrics path without starting a second I2S reader. Maintainers can still turn the Kconfig option off for audio-free builds.
+
+## Software correctness follow-up (2026-10-07)
+
+Sampled sound, battery, USB power, BMI270 motion and ADC conditions advance sustain only on new valid measurements. They expire after three configured producer intervals (sound metrics window or hardware poll interval); gaps reset pending sustain without consuming cooldown, fire count or event sequence. USB power and motion publish each successful poll, including unchanged values. Connectivity and debounced GPIO levels retain timer-driven state semantics. Capture stop/playback explicitly invalidate sound conditions outside the audio owner lock.
+
+The existing `/api/rules/test` compatibility route is an explicitly labeled **Test first action** operation: one action, no condition/sustain/cooldown evaluation, no fan-out and no rule fire-count change. Queue rejection does not consume its event sequence. This route is not evidence that an automation rule was evaluated successfully.
+
+The clock contract uses the [ESP-IDF v6.1 standard I2S implementation](https://github.com/espressif/esp-idf/blob/v6.1/components/esp_driver_i2s/i2s_std.c): two 32-bit slots at 16 kHz produce 1.024 MHz BCLK, even with mono payload. Constants, generated expectations and tests agree with this formula; no physical clock result is claimed. Configuration persistence follows [Espressif's NVS commit contract](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32s3/api-reference/storage/nvs_flash.html), with application-level synchronization covering the entire LCD/Web transaction.
 
 See [the confirmed reliability review](confirmed_reliability_review.md) for source-backed initialization, transaction, queue, memory, IR, and session fixes and their qualification limits.

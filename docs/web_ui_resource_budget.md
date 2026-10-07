@@ -37,10 +37,10 @@ Measured by `webui/build_webui.py --check` and `tools/check_web_ui_budget.py` fo
 
 | Measurement | Current value | Budget status |
 | --- | ---: | --- |
-| Generated `webui_index_html` asset | 15,093 bytes | Under 32 KiB target |
-| Minified HTML shell source, excluding injected CSS/JS | 6,153 bytes | Under 8 KiB hard ceiling |
+| Generated `webui_index_html` asset | 15,855 bytes | Under 32 KiB target |
+| Minified HTML shell source, excluding injected CSS/JS | 6,516 bytes | Under 8 KiB hard ceiling |
 | CSS source before minification | 1,921 bytes | Under 12 KiB hard ceiling |
-| JavaScript source before minification | 7,254 bytes | Under 25 KiB hard ceiling |
+| JavaScript source before minification | 7,653 bytes | Under 25 KiB hard ceiling |
 | URI handlers added for UI assets | 0 | Preserves existing 17-handler table |
 
 On ESP-IDF, `GET /` sends the generated const asset directly with `httpd_resp_send()` and does not allocate the `RULE_WEB_MAX_RESPONSE` heap buffer used by JSON/API routes. Host tests still exercise `rule_web_handle_request()` by copying the generated asset into the caller-provided test buffer.
