@@ -126,6 +126,14 @@ When enabled, the web server exposes a small local configuration UI at `/` plus 
 | `/api/hat/probe` | POST | Fail-closed HAT capability probe placeholder; HAT drivers are not enabled yet. |
 
 
+#### Configuration edit contract
+
+`POST /api/config` accepts a complete `rules` snapshot or the existing flat first-rule form. JSON number spelling, whitespace, string escaping, and UTF-8 follow [RFC 8259](https://www.rfc-editor.org/rfc/rfc8259.html); integer fields also enforce their schema range and reject fractional values. Duplicate decoded keys, trailing content, embedded NULs, invalid field types (including inactive threshold/GPIO fields), and overlong strings are rejected before changing runtime or stored configuration. Unknown fields remain allowed within the existing size, depth, and node limits.
+
+Presets replace the configuration only through an exact literal command (`defaults`, `loud_sound_local_ui`, `sound_local_ui`, or `button_local_ui`) or a JSON object containing only `preset`. Empty requests and preset objects mixed with configuration fields are rejected. Preset text in a rule name, URL, or token remains ordinary data.
+
+LCD enable, trigger, and action saves apply only the selected edit to the latest stored configuration. Reselecting the existing trigger/action preserves its parameters; changing its type applies that type's preset. Other rules, remaining actions, credentials, names, and cooldowns are preserved. Full exported snapshots retain their replacement semantics, and masked credentials are resolved against the current rule ID and action position.
+
 #### On-device setup hierarchy
 
 The onboard LCD menu uses the canonical product hierarchy for local setup:

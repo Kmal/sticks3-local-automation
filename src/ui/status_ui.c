@@ -524,7 +524,7 @@ static bool status_ui_action_automation_toggle_enable(ui_runtime_t *ui, const ui
     uint8_t index = item->automation_index;
     (void)ui_runtime_load_automation(ui, index);
     ui->automations[index].enabled = !ui->automations[index].enabled;
-    bool ok = ui_runtime_save_automation(ui, index);
+    bool ok = ui_runtime_save_automation(ui, index, UI_AUTOMATION_EDIT_ENABLED);
     if (ok) {
         status_ui_notify_automation_config_changed();
     }
@@ -542,7 +542,7 @@ static bool status_ui_action_automation_edit_trigger(ui_runtime_t *ui, const ui_
     ui_automation_state_t *slot = &ui->automations[index];
     size_t selected = item->flags < (sizeof(s_trigger_preset_sources) / sizeof(s_trigger_preset_sources[0])) ? item->flags : 0u;
     slot->trigger_source = s_trigger_preset_sources[selected];
-    bool ok = ui_runtime_save_automation(ui, index);
+    bool ok = ui_runtime_save_automation(ui, index, UI_AUTOMATION_EDIT_TRIGGER);
     if (ok) {
         status_ui_notify_automation_config_changed();
         (void)ui_nav_back(&ui->nav);
@@ -558,7 +558,7 @@ static bool status_ui_action_automation_edit_action(ui_runtime_t *ui, const ui_m
     ui_automation_state_t *slot = &ui->automations[index];
     size_t selected = item->flags < (sizeof(s_action_preset_kinds) / sizeof(s_action_preset_kinds[0])) ? item->flags : 0u;
     slot->action_kind = s_action_preset_kinds[selected];
-    bool ok = ui_runtime_save_automation(ui, index);
+    bool ok = ui_runtime_save_automation(ui, index, UI_AUTOMATION_EDIT_ACTION);
     if (ok) {
         status_ui_notify_automation_config_changed();
         (void)ui_nav_back(&ui->nav);
