@@ -625,12 +625,16 @@ static void app_web_ui_service_changed(bool enabled, void *ctx)
         return;
     }
 
+    /* httpd_stop waits for handlers, which may need the rule mutex. */
+    const bool stopping = !enabled && s_rule_web.started;
+    if (stopping) rule_web_stop(&s_rule_web);
     if (s_rule_mutex != NULL) {
         (void)xSemaphoreTake(s_rule_mutex, portMAX_DELAY);
     }
     if (enabled) {
         if (!s_rule_web.started && rule_web_start_locked(&s_rule_web, &s_rule_runtime, &s_rule_store,
                                                        app_rule_web_runtime_lock, app_rule_web_runtime_unlock, s_rule_mutex)) {
+            status_ui_set_web_access_code(s_rule_web.access_token);
             rule_web_set_config_changed_callback(&s_rule_web, app_rule_web_config_changed_cb, NULL);
 #if CONFIG_APP_SOUND_LEVEL_TRIGGERS
             app_sound_level_demand_set_telemetry(&s_sound_level_demand, true);
@@ -645,8 +649,8 @@ static void app_web_ui_service_changed(bool enabled, void *ctx)
             ESP_LOGE(TAG, "web UI server failed to start");
         }
     } else {
-        if (s_rule_web.started) {
-            rule_web_stop(&s_rule_web);
+        if (stopping) {
+            status_ui_set_web_access_code(NULL);
 #if CONFIG_APP_SOUND_LEVEL_TRIGGERS
             app_sound_level_demand_set_telemetry(&s_sound_level_demand, false);
 #endif
@@ -706,6 +710,7 @@ void app_main(void)
         status_ui_set_state(STATUS_UI_STATE_ERROR);
         app_idle_forever();
     }
+
 
 #if CONFIG_APP_USB_UAC_DEVICE
     ESP_LOGI(TAG, "app_main: USB Audio Class init start");

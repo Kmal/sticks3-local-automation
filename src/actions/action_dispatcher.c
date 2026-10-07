@@ -17,6 +17,7 @@ static action_result_t make_result(action_result_code_t code, const rule_event_t
 
 #ifdef ESP_PLATFORM
 static void action_dispatcher_worker(void *arg);
+static void action_dispatcher_network_worker(void *arg);
 #endif
 
 static void set_last_result(action_dispatcher_t *dispatcher, action_result_t result)
@@ -30,7 +31,7 @@ static void set_last_result(action_dispatcher_t *dispatcher, action_result_t res
 #endif
 }
 
-static action_result_t execute_event(action_dispatcher_t *dispatcher, const rule_event_t *event)
+static action_result_t execute_event_unlocked(action_dispatcher_t *dispatcher, const rule_event_t *event)
 {
     if (event == NULL) {
         return make_result(ACTION_RESULT_INVALID_ARG, NULL);
@@ -67,6 +68,22 @@ static action_result_t execute_event(action_dispatcher_t *dispatcher, const rule
     }
 }
 
+/* Mixed network jobs may include hardware actions. Serialize those actions
+ * across workers, but never hold this lock during an HTTP request. */
+static action_result_t execute_event(action_dispatcher_t *dispatcher, const rule_event_t *event)
+{
+#ifdef ESP_PLATFORM
+    bool local = event != NULL && event->action != RULE_ACTION_HTTP_POST;
+    if (local && xSemaphoreTake(dispatcher->local_execution_lock, portMAX_DELAY) != pdTRUE)
+        return make_result(ACTION_RESULT_NOT_STARTED, event);
+#endif
+    action_result_t result = execute_event_unlocked(dispatcher, event);
+#ifdef ESP_PLATFORM
+    if (local) xSemaphoreGive(dispatcher->local_execution_lock);
+#endif
+    return result;
+}
+
 void action_dispatcher_init(action_dispatcher_t *dispatcher)
 {
     if (dispatcher == NULL) {
@@ -75,6 +92,7 @@ void action_dispatcher_init(action_dispatcher_t *dispatcher)
     memset(dispatcher, 0, sizeof(*dispatcher));
 #ifdef ESP_PLATFORM
     dispatcher->result_lock = (portMUX_TYPE)portMUX_INITIALIZER_UNLOCKED;
+    atomic_init(&dispatcher->stop_requested, false);
 #endif
     set_last_result(dispatcher, make_result(ACTION_RESULT_NOT_STARTED, NULL));
 }
@@ -91,11 +109,31 @@ bool action_dispatcher_start(action_dispatcher_t *dispatcher)
         set_last_result(dispatcher, make_result(ACTION_RESULT_QUEUE_FULL, NULL));
         return false;
     }
+    dispatcher->network_queue_handle = xQueueCreate(ACTION_DISPATCHER_QUEUE_LEN, sizeof(action_job_t));
+    if (dispatcher->network_queue_handle == NULL) {
+        vQueueDelete(dispatcher->queue_handle); dispatcher->queue_handle = NULL;
+        return false;
+    }
+    dispatcher->local_execution_lock = xSemaphoreCreateMutex();
+    if (dispatcher->local_execution_lock == NULL) {
+        action_dispatcher_stop(dispatcher);
+        return false;
+    }
     dispatcher->stop_requested = false;
     if (xTaskCreate(action_dispatcher_worker, "rule_action_worker", 4096, dispatcher, tskIDLE_PRIORITY + 1, &dispatcher->worker_task) != pdPASS) {
         vQueueDelete(dispatcher->queue_handle);
+        vQueueDelete(dispatcher->network_queue_handle);
+        dispatcher->network_queue_handle = NULL;
         dispatcher->queue_handle = NULL;
+        vSemaphoreDelete(dispatcher->local_execution_lock); dispatcher->local_execution_lock = NULL;
         set_last_result(dispatcher, make_result(ACTION_RESULT_NOT_STARTED, NULL));
+        return false;
+    }
+#endif
+#ifdef ESP_PLATFORM
+    if (xTaskCreate(action_dispatcher_network_worker, "rule_network_worker", 4096, dispatcher,
+                    tskIDLE_PRIORITY + 1, &dispatcher->network_worker_task) != pdPASS) {
+        action_dispatcher_stop(dispatcher);
         return false;
     }
 #endif
@@ -157,24 +195,30 @@ bool action_enqueue_batch(action_dispatcher_t *dispatcher, const rule_event_batc
         }
         return false;
     }
+    bool network = false;
+    for (size_t i = 0; i < batch->event_count; ++i) network |= batch->events[i].action == RULE_ACTION_HTTP_POST;
     const rule_event_t *event = &batch->events[0];
     if (!dispatcher->started) {
         set_last_result(dispatcher, make_result(ACTION_RESULT_NOT_STARTED, event));
         return false;
     }
 #ifdef ESP_PLATFORM
-    if (dispatcher->queue_handle == NULL || xQueueSend(dispatcher->queue_handle, batch, 0) != pdPASS) {
+    QueueHandle_t queue = network ? dispatcher->network_queue_handle : dispatcher->queue_handle;
+    if (queue == NULL || xQueueSend(queue, batch, 0) != pdPASS) {
         set_last_result(dispatcher, make_result(ACTION_RESULT_QUEUE_FULL, event));
         return false;
     }
 #else
-    if (dispatcher->count >= ACTION_DISPATCHER_QUEUE_LEN) {
+    size_t *count = network ? &dispatcher->network_count : &dispatcher->count;
+    size_t *tail = network ? &dispatcher->network_tail : &dispatcher->tail;
+    action_job_t *queue = network ? dispatcher->network_queue : dispatcher->queue;
+    if (*count >= ACTION_DISPATCHER_QUEUE_LEN) {
         set_last_result(dispatcher, make_result(ACTION_RESULT_QUEUE_FULL, event));
         return false;
     }
-    dispatcher->queue[dispatcher->tail] = *batch;
-    dispatcher->tail = (dispatcher->tail + 1u) % ACTION_DISPATCHER_QUEUE_LEN;
-    dispatcher->count++;
+    queue[*tail] = *batch;
+    *tail = (*tail + 1u) % ACTION_DISPATCHER_QUEUE_LEN;
+    ++*count;
 #endif
     return true;
 }
@@ -202,22 +246,22 @@ static size_t execute_job(action_dispatcher_t *dispatcher, const action_job_t *j
 
 static size_t process_job(action_dispatcher_t *dispatcher)
 {
-#ifdef ESP_PLATFORM
+    if (dispatcher == NULL || !dispatcher->started) return 0;
     action_job_t job;
-    if (dispatcher == NULL || !dispatcher->started || dispatcher->queue_handle == NULL ||
-        xQueueReceive(dispatcher->queue_handle, &job, 0) != pdPASS) {
-        return false;
-    }
-    return execute_job(dispatcher, &job);
+#ifdef ESP_PLATFORM
+    if (xQueueReceive(dispatcher->queue_handle, &job, 0) != pdPASS &&
+        xQueueReceive(dispatcher->network_queue_handle, &job, 0) != pdPASS) return 0;
 #else
-    if (dispatcher == NULL || !dispatcher->started || dispatcher->count == 0) {
-        return false;
-    }
-    action_job_t job = dispatcher->queue[dispatcher->head];
-    dispatcher->head = (dispatcher->head + 1u) % ACTION_DISPATCHER_QUEUE_LEN;
-    dispatcher->count--;
-    return execute_job(dispatcher, &job);
+    const bool network = dispatcher->count == 0;
+    size_t *count = network ? &dispatcher->network_count : &dispatcher->count;
+    size_t *head = network ? &dispatcher->network_head : &dispatcher->head;
+    action_job_t *queue = network ? dispatcher->network_queue : dispatcher->queue;
+    if (*count == 0) return 0;
+    job = queue[*head];
+    *head = (*head + 1u) % ACTION_DISPATCHER_QUEUE_LEN;
+    --*count;
 #endif
+    return execute_job(dispatcher, &job);
 }
 
 bool action_dispatcher_process_one(action_dispatcher_t *dispatcher)
@@ -243,6 +287,12 @@ void action_dispatcher_stop(action_dispatcher_t *dispatcher)
     dispatcher->started = false;
 #ifdef ESP_PLATFORM
     dispatcher->stop_requested = true;
+    if (dispatcher->network_worker_task != NULL) {
+        vTaskDelete(dispatcher->network_worker_task); dispatcher->network_worker_task = NULL;
+    }
+    if (dispatcher->network_queue_handle != NULL) {
+        vQueueDelete(dispatcher->network_queue_handle); dispatcher->network_queue_handle = NULL;
+    }
     if (dispatcher->worker_task != NULL) {
         vTaskDelete(dispatcher->worker_task);
         dispatcher->worker_task = NULL;
@@ -251,10 +301,14 @@ void action_dispatcher_stop(action_dispatcher_t *dispatcher)
         vQueueDelete(dispatcher->queue_handle);
         dispatcher->queue_handle = NULL;
     }
+    if (dispatcher->local_execution_lock != NULL) {
+        vSemaphoreDelete(dispatcher->local_execution_lock); dispatcher->local_execution_lock = NULL;
+    }
 #else
     dispatcher->head = 0;
     dispatcher->tail = 0;
     dispatcher->count = 0;
+    dispatcher->network_count = dispatcher->network_head = dispatcher->network_tail = 0;
 #endif
 }
 
@@ -276,15 +330,18 @@ action_result_t action_dispatcher_get_last_result(const action_dispatcher_t *dis
 
 
 #ifdef ESP_PLATFORM
-static void action_dispatcher_worker(void *arg)
+static void action_dispatcher_worker_loop(void *arg, bool network)
 {
     action_dispatcher_t *dispatcher = (action_dispatcher_t *)arg;
     action_job_t job;
+    QueueHandle_t queue = network ? dispatcher->network_queue_handle : dispatcher->queue_handle;
     while (dispatcher != NULL && !dispatcher->stop_requested) {
-        if (dispatcher->queue_handle != NULL && xQueueReceive(dispatcher->queue_handle, &job, portMAX_DELAY) == pdPASS) {
+        if (queue != NULL && xQueueReceive(queue, &job, portMAX_DELAY) == pdPASS) {
             (void)execute_job(dispatcher, &job);
         }
     }
     vTaskDelete(NULL);
 }
+static void action_dispatcher_worker(void *arg) { action_dispatcher_worker_loop(arg, false); }
+static void action_dispatcher_network_worker(void *arg) { action_dispatcher_worker_loop(arg, true); }
 #endif

@@ -1,9 +1,10 @@
 #include "action_http.h"
 
 #include <stdio.h>
+#include <stdatomic.h>
 #include <string.h>
 
-static bool s_action_http_network_ready;
+static atomic_bool s_action_http_network_ready;
 
 void action_http_set_network_ready(bool ready)
 {

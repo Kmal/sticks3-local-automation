@@ -193,6 +193,7 @@ static void test_runtime_bmi270_hardware_fact_to_action_result(void)
 {
     fake_register_bus_reset();
     fake_register_bus_set_reg(BOARD_BMI270_ADDR, 0x00, 0x24);
+    fake_register_bus_set_reg(BOARD_BMI270_ADDR, 0x21, 1);
     set_fake_accel_raw(0, 0, 0);
     automation_config_t config = hardware_runtime_config(RULE_SOURCE_BMI270_MOTION, "", RULE_COMPARATOR_EQ, rule_value_bool(true));
     rule_runtime_t runtime;

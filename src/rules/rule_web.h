@@ -23,6 +23,8 @@ typedef enum {
 
 typedef struct {
     bool started;
+    char access_token[17];
+    unsigned failed_auth_attempts;
     rule_runtime_t *runtime;
     rule_config_store_t *store;
     rule_web_config_changed_cb_t config_changed_cb;
@@ -38,6 +40,9 @@ typedef struct {
 bool rule_web_start(rule_web_t *web, rule_runtime_t *runtime, rule_config_store_t *store);
 bool rule_web_start_locked(rule_web_t *web, rule_runtime_t *runtime, rule_config_store_t *store,
                            rule_web_lock_cb_t lock_cb, rule_web_unlock_cb_t unlock_cb, void *ctx);
+/* Session token is delivered only on the physical device, never in HTML/API. */
+void rule_web_set_access_token(rule_web_t *web, const char *token);
+bool rule_web_authorize(rule_web_t *web, const char *token);
 void rule_web_stop(rule_web_t *web);
 void rule_web_set_sound_status_builder(rule_web_sound_status_cb_t cb, void *ctx);
 void rule_web_set_config_changed_callback(rule_web_t *web, rule_web_config_changed_cb_t cb, void *ctx);

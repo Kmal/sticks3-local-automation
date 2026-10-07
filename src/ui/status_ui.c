@@ -145,6 +145,12 @@ const char *status_ui_state_name(status_ui_state_t state)
     }
 }
 
+void status_ui_set_web_access_code(const char *code)
+{
+    snprintf(s_ui.web_access_code, sizeof(s_ui.web_access_code), "%s", code != NULL ? code : "");
+    s_ui.dirty = true;
+}
+
 void status_ui_set_state(status_ui_state_t state)
 {
     bool changed = false;
@@ -370,6 +376,10 @@ static bool status_ui_ap_start(ui_runtime_t *ui)
 {
     if (ui == NULL) return false;
     if (!ui->ap.loaded_from_config) (void)status_ui_ap_load_config(ui);
+    if (strlen(ui->ap.ap_password) < 8u) {
+        ui_runtime_set_toast(ui, UI_TOAST_ERROR, "Set AP password (8+ chars)", 2500u);
+        return false;
+    }
     if (!status_ui_ap_save_config(ui)) return false;
     bool ok = app_wifi_start_ap_configured(ui->ap.ap_name, ui->ap.ap_password, ui->ap.channel, true);
     (void)status_ui_ap_refresh_url(ui);

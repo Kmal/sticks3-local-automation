@@ -20,6 +20,8 @@
 #ifdef ESP_PLATFORM
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_random.h"
+#include "esp_heap_caps.h"
 
 
 static const char *TAG = "RULE_WEB";
@@ -32,9 +34,23 @@ static esp_err_t rule_web_http_handler(httpd_req_t *req)
         return httpd_resp_send(req, (const char *)webui_index_html, (ssize_t)webui_index_html_len) == ESP_OK ? ESP_OK : ESP_FAIL;
     }
 
+    if (req->method == HTTP_GET && strcmp(req->uri, "/favicon.ico") == 0)
+        return httpd_resp_send(req, "", 0);
+    char token[17] = {0};
+    if (httpd_req_get_hdr_value_len(req, "X-Device-Token") == 16)
+        (void)httpd_req_get_hdr_value_str(req, "X-Device-Token", token, sizeof(token));
+    if (!rule_web_authorize(web, token)) {
+        httpd_resp_set_hdr(req, "Connection", "close");
+        httpd_resp_set_status(req, "401 Unauthorized");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"error\":\"Enter the code on the device; reopen Web UI after five failed attempts\"}");
+        return ESP_FAIL; /* Close without draining an untrusted request body. */
+    }
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+
     const bool config_route = strcmp(req->uri, "/api/config") == 0;
     const size_t body_limit = config_route ? RULE_WEB_MAX_BODY : RULE_WEB_SMALL_BODY;
-    const size_t response_limit = config_route ? RULE_WEB_MAX_RESPONSE :
+    const size_t response_limit = config_route && req->method == HTTP_GET ? RULE_WEB_MAX_RESPONSE :
                                   (strcmp(req->uri, "/api/capabilities") == 0 ? 16384u : 2048u);
     if (req->content_len >= body_limit) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body too large");
@@ -47,6 +63,11 @@ static esp_err_t rule_web_http_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "rule web allocation failed");
         return ESP_FAIL;
     }
+    if (config_route) ESP_LOGI(TAG, "config request: body=%u response=%u internal_free=%u largest=%u minimum=%u",
+        (unsigned)(req->content_len + 1), (unsigned)response_limit,
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     if (req->method == HTTP_POST) {
         size_t received = 0;
         while (received < req->content_len) {
@@ -115,6 +136,11 @@ bool rule_web_start_locked(rule_web_t *web, rule_runtime_t *runtime, rule_config
     web->runtime_unlock_cb = unlock_cb;
     web->runtime_lock_ctx = ctx;
 #ifdef ESP_PLATFORM
+    /* Web UI starts only after the Wi-Fi radio is enabled (RNG entropy). */
+    uint8_t random[8];
+    esp_fill_random(random, sizeof(random));
+    for (size_t i = 0; i < sizeof(random); ++i)
+        (void)snprintf(web->access_token + i * 2, 3, "%02x", random[i]);
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 17;
     config.stack_size = 8192;
@@ -158,6 +184,24 @@ bool rule_web_start_locked(rule_web_t *web, rule_runtime_t *runtime, rule_config
     return true;
 }
 
+void rule_web_set_access_token(rule_web_t *web, const char *token)
+{
+    if (web == NULL) return;
+    memset(web->access_token, 0, sizeof(web->access_token));
+    web->failed_auth_attempts = 0;
+    if (token != NULL && strlen(token) == 16) memcpy(web->access_token, token, 16);
+}
+
+bool rule_web_authorize(rule_web_t *web, const char *token)
+{
+    if (web == NULL || !web->started || web->access_token[0] == '\0' || web->failed_auth_attempts >= 5) return false;
+    unsigned difference = 0;
+    if (token == NULL || strlen(token) != 16) difference = 1;
+    else for (size_t i = 0; i < 16; ++i) difference |= (unsigned char)token[i] ^ (unsigned char)web->access_token[i];
+    if (difference != 0) { ++web->failed_auth_attempts; return false; }
+    return true;
+}
+
 void rule_web_stop(rule_web_t *web)
 {
     if (web != NULL) {
@@ -169,6 +213,7 @@ void rule_web_stop(rule_web_t *web)
         }
 #endif
         web->started = false;
+        rule_web_set_access_token(web, NULL);
     }
 }
 
@@ -214,11 +259,29 @@ static bool rule_web_get_status_json_unlocked(const rule_web_t *web, char *out, 
     if (s_sound_status_cb == NULL || !s_sound_status_cb(sound, sizeof(sound), s_sound_status_ctx)) {
         (void)snprintf(sound, sizeof(sound), "{\"enabled\":false,\"running\":false,\"state\":\"disabled\",\"reason\":\"audio_capture_disabled\"}");
     }
+    char resources[384];
+#ifdef ESP_PLATFORM
+    const size_t local_jobs = uxQueueMessagesWaiting(web->runtime->dispatcher.queue_handle);
+    const size_t network_jobs = uxQueueMessagesWaiting(web->runtime->dispatcher.network_queue_handle);
+    snprintf(resources, sizeof(resources),
+        "\"internal_free\":%u,\"internal_min\":%u,\"internal_largest\":%u,\"psram_free\":%u,\"http_stack_margin\":%u,\"local_stack_margin\":%u,\"network_stack_margin\":%u,",
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+        (unsigned)uxTaskGetStackHighWaterMark(NULL),
+        (unsigned)uxTaskGetStackHighWaterMark(web->runtime->dispatcher.worker_task),
+        (unsigned)uxTaskGetStackHighWaterMark(web->runtime->dispatcher.network_worker_task));
+#else
+    const size_t local_jobs = web->runtime->dispatcher.count;
+    const size_t network_jobs = web->runtime->dispatcher.network_count;
+    resources[0] = '\0';
+#endif
     action_result_t result = rule_runtime_get_last_action_result(web->runtime);
     const int written = snprintf(out, out_len,
-                                 "{\"started\":%s,\"last_action\":%d,\"capabilities_ready\":true,\"http_network_ready\":%s,\"wifi\":%s,\"sound\":%s}",
+                                 "{\"started\":%s,\"last_action\":%d,\"capabilities_ready\":true,\"http_network_ready\":%s,\"wifi\":%s,\"sound\":%s,\"resources\":{%s\"local_jobs\":%u,\"network_jobs\":%u,\"enqueue_errors\":%u}}",
                                  web->started ? "true" : "false", (int)result.code,
-                                 action_http_network_ready() ? "true" : "false", wifi, sound);
+                                 action_http_network_ready() ? "true" : "false", wifi, sound, resources, (unsigned)local_jobs, (unsigned)network_jobs, (unsigned)web->runtime->enqueue_errors);
     return written > 0 && (size_t)written < out_len;
 }
 
@@ -1059,7 +1122,7 @@ static bool rule_web_handle_request_unlocked(rule_web_t *web, rule_web_method_t 
             const int written = snprintf(out, out_len, "{\"ok\":false,\"error\":\"invalid_ap_ssid\"}");
             return written > 0 && (size_t)written < out_len;
         }
-        if (ap_password_len > 0u && (ap_password_len < 8u || ap_password_len > 63u)) {
+        if (ap_password_len < 8u || ap_password_len > 63u) {
             const int written = snprintf(out, out_len, "{\"ok\":false,\"error\":\"invalid_ap_password\"}");
             return written > 0 && (size_t)written < out_len;
         }
@@ -1130,9 +1193,9 @@ static bool rule_web_handle_request_unlocked(rule_web_t *web, rule_web_method_t 
         if (web->config_changed_cb != NULL) {
             web->config_changed_cb(config, web->config_changed_ctx);
         }
-        const bool written = write_config_json(config, out, out_len);
         free(config);
-        return written;
+        const int written = snprintf(out, out_len, "{\"ok\":true}");
+        return written > 0 && (size_t)written < out_len;
     }
     if (method == RULE_WEB_METHOD_POST && strcmp(path, "/api/rules/test") == 0) {
         const automation_rule_t *rule = web->runtime->engine.config.rule_count > 0 ? &web->runtime->engine.config.rules[0] : NULL;

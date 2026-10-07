@@ -542,7 +542,7 @@ bool app_wifi_start_ap_configured(const char *ap_ssid, const char *ap_password, 
     (void)ap_ssid; (void)ap_password; (void)channel; (void)persist;
     return false;
 #else
-    if (!validate_ssid(ap_ssid) || !validate_password(ap_password) || !validate_channel(channel)) {
+    if (!validate_ssid(ap_ssid) || (ap_password == NULL || strlen(ap_password) < 8u || !validate_password(ap_password)) || !validate_channel(channel)) {
         ESP_LOGW(TAG, "invalid AP configuration");
         return false;
     }
@@ -1029,7 +1029,7 @@ bool app_wifi_scan(app_wifi_scan_results_t *out)
 bool app_wifi_start_ap_configured(const char *ap_ssid, const char *ap_password, uint8_t channel, bool persist)
 {
     (void)persist;
-    if (!validate_ssid(ap_ssid) || !validate_password(ap_password) || !validate_channel(channel)) {
+    if (!validate_ssid(ap_ssid) || (ap_password == NULL || strlen(ap_password) < 8u || !validate_password(ap_password)) || !validate_channel(channel)) {
         return false;
     }
     load_config_once();
