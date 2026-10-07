@@ -188,7 +188,11 @@ bool ui_runtime_load_automation(ui_runtime_t *ui, uint8_t automation_index)
     automation_config_set_defaults(config);
     rule_config_store_t store = {0};
     if (rule_config_store_open(&store)) {
-        (void)rule_config_store_load(&store, config);
+        if (!rule_config_store_load(&store, config)) {
+            rule_config_store_close(&store);
+            free(config);
+            return false;
+        }
         rule_config_store_close(&store);
     }
     ui_automation_state_t *slot = &ui->automations[automation_index];
@@ -207,15 +211,20 @@ bool ui_runtime_load_automation(ui_runtime_t *ui, uint8_t automation_index)
     return false;
 }
 
-bool ui_runtime_save_automation(ui_runtime_t *ui, uint8_t automation_index)
+bool ui_runtime_save_automation(ui_runtime_t *ui, uint8_t automation_index, ui_automation_edit_t edit)
 {
-    if (ui == NULL || automation_index >= UI_AUTOMATION_VISIBLE_COUNT) return false;
+    if (ui == NULL || automation_index >= UI_AUTOMATION_VISIBLE_COUNT ||
+        edit < UI_AUTOMATION_EDIT_ENABLED || edit > UI_AUTOMATION_EDIT_ACTION) return false;
     automation_config_t *config = malloc(sizeof(*config));
     if (config == NULL) return false;
     automation_config_set_defaults(config);
     rule_config_store_t store = {0};
     if (!rule_config_store_open(&store)) { free(config); return false; }
-    (void)rule_config_store_load(&store, config);
+    if (!rule_config_store_load(&store, config)) {
+        rule_config_store_close(&store);
+        free(config);
+        return false;
+    }
     ui_automation_state_t *slot = &ui->automations[automation_index];
     if (config->rule_count <= automation_index) {
         for (size_t i = config->rule_count; i <= automation_index; ++i) {
@@ -235,20 +244,22 @@ bool ui_runtime_save_automation(ui_runtime_t *ui, uint8_t automation_index)
         config->rule_count = automation_index + 1u;
     }
     automation_rule_t *rule = &config->rules[automation_index];
-    rule->enabled = slot->enabled;
+    if (edit == UI_AUTOMATION_EDIT_ENABLED) rule->enabled = slot->enabled;
     if (rule->id == 0u) rule->id = (uint32_t)automation_index + 1u;
-    if (rule->name[0] == '\0') {
-        snprintf(rule->name, sizeof(rule->name), "Automation %u", (unsigned)automation_index + 1u);
-    }
-    if (rule->when.source != slot->trigger_source) apply_trigger_preset(&rule->when, slot->trigger_source);
+    if (edit == UI_AUTOMATION_EDIT_TRIGGER && rule->when.source != slot->trigger_source) apply_trigger_preset(&rule->when, slot->trigger_source);
     if (rule->action_count == 0u) rule->action_count = 1u;
-    if (rule->actions[0].type != slot->action_kind) apply_action_preset(&rule->actions[0], slot->action_kind);
+    if (edit == UI_AUTOMATION_EDIT_ACTION && rule->actions[0].type != slot->action_kind) apply_action_preset(&rule->actions[0], slot->action_kind);
     if (rule->cooldown_ms < RULE_MIN_COOLDOWN_MS || rule->cooldown_ms > RULE_MAX_COOLDOWN_MS) {
         rule->cooldown_ms = 1000u;
     }
     char error[RULE_ERROR_MAX] = {0};
     bool ok = automation_config_validate(config, error, sizeof(error)) && rule_config_store_save(&store, config);
     rule_config_store_close(&store);
+    if (ok) {
+        slot->enabled = rule->enabled;
+        slot->trigger_source = rule->when.source;
+        slot->action_kind = rule->actions[0].type;
+    }
     free(config);
     automation_label(slot);
     slot->loaded = ok;

@@ -332,7 +332,7 @@ static void test_complete_config_roundtrip_and_strict_parser(void)
     ui_runtime_t ui;
     ui_runtime_init(&ui);
     ASSERT_TRUE(ui_runtime_load_automation(&ui, 0));
-    ASSERT_TRUE(ui_runtime_save_automation(&ui, 0));
+    ASSERT_TRUE(ui_runtime_save_automation(&ui, 0, UI_AUTOMATION_EDIT_ENABLED));
     ASSERT_TRUE(rule_config_store_load(&store, &persisted));
     ASSERT_TRUE(memcmp(&config, &persisted, sizeof(config)) == 0);
     const char *bad[] = {
@@ -366,7 +366,7 @@ static void test_complete_config_roundtrip_and_strict_parser(void)
     persisted.rule_count = 0;
     ASSERT_TRUE(rule_config_store_save(&store, &persisted));
     ui_runtime_init(&ui);
-    ASSERT_TRUE(ui_runtime_save_automation(&ui, 1));
+    ASSERT_TRUE(ui_runtime_save_automation(&ui, 1, UI_AUTOMATION_EDIT_ENABLED));
     ASSERT_TRUE(rule_config_store_load(&store, &persisted));
     ASSERT_EQ_U32(2, persisted.rule_count);
     ASSERT_TRUE(automation_config_validate(&persisted, NULL, 0));
@@ -494,8 +494,182 @@ static void test_export_fits_import_limit_and_oversize_requests_do_not_mutate(vo
     rule_config_store_close(&store);
 }
 
+static automation_config_t preservation_config(void)
+{
+    automation_config_t config;
+    automation_config_set_defaults(&config);
+    automation_rule_t *rule = &config.rules[0];
+    rule->enabled = false;
+    rule->when.source = RULE_SOURCE_SOUND_RMS_DBFS;
+    rule->when.threshold = rule_value_i32(-2222);
+    rule->when.comparator = RULE_COMPARATOR_GTE;
+    rule->when.sustain_ms = 777;
+    rule->cooldown_ms = 4321;
+    rule->action_count = 2;
+    rule->actions[0].type = RULE_ACTION_HTTP_POST;
+    rule->actions[0].timeout_ms = 3456;
+    rule->name[0] = '\0';
+    snprintf(rule->actions[0].http_url, RULE_HTTP_URL_MAX, "https://example.invalid/button_local_ui");
+    snprintf(rule->actions[0].http_bearer_token, RULE_HTTP_AUTH_MAX, "sound_local_ui");
+    rule->actions[1].type = RULE_ACTION_LOCAL_UI;
+    config.rules[1].id = 99;
+    snprintf(config.rules[1].name, RULE_NAME_MAX, "Keep second rule");
+    return config;
+}
+
+static void test_strict_config_parsing_preserves_runtime_and_store(void)
+{
+    automation_config_t config = preservation_config();
+    rule_runtime_t runtime;
+    rule_config_store_t store;
+    rule_web_t web;
+    ASSERT_TRUE(rule_runtime_init(&runtime, &config));
+    ASSERT_TRUE(rule_config_store_open(&store));
+    ASSERT_TRUE(rule_config_store_save(&store, &config));
+    ASSERT_TRUE(rule_web_start(&web, &runtime, &store));
+    rule_web_set_config_changed_callback(&web, capture_config_changed, NULL);
+    char response[16384];
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config",
+        "{\"source\":\"sound.rms_dbfs\",\"action\":\"http_post\",\"enabled\":false,\"name\":\"button_local_ui\"}", response, sizeof(response)));
+    snprintf(config.rules[0].name, RULE_NAME_MAX, "button_local_ui");
+    ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
+    char exported[32768];
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_GET, "/api/config", NULL, exported, sizeof(exported)));
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config", exported, response, sizeof(response)));
+    ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
+    const char *invalid[] = {
+        "{\"rules\":[{\"id\":1,\"cooldown_ms\":01000}]}",
+        "{\"rules\":[{\"id\":1,\"cooldown_ms\":1000.}]}",
+        "{\"rules\":[{\"id\":1,\"cooldown_ms\":1e}]}",
+        "{\"rules\":[{\"id\":1,\"name\":\"raw\nnewline\"}]}",
+        "{\"rules\":[{\"id\":1,\"name\":\"\xc0\xaf\"}]}",
+        "{\"rules\":[{\"id\":1,\"name\":\"\xed\xa0\x80\"}]}",
+        "{\"rules\":[{\"id\":1,\"name\":\"\xf4\x90\x80\x80\"}]}",
+        "{\"rules\":[]}\v",
+        "{\"rules\":[{\"id\":1,\"threshold_bool\":\"false\"}]}",
+        "{\"rules\":[{\"id\":1,\"gpio_pin\":true}]}",
+        "{\"rules\":[{\"id\":1,\"gpio_profile\":\"bogus\"}]}",
+        "{\"rules\":[{\"id\":1,\"gpio_debounce_ms\":-1}]}",
+        "{\"preset\":\"defaults\",\"rules\":[]}",
+        "{\"preset\":\"unknown\",\"rules\":[]}",
+        "{\"preset\":false,\"rules\":[]}",
+        NULL, "", "{}", "[]", "null",
+        "junk \"source\":\"sound.rms_dbfs\",\"action\":\"local_ui\" trailing junk",
+        "{\"source\":\"sound.rms_dbfs\",\"action\":\"local_ui\"} trailing",
+        "{\"source\":\"sound.rms_dbfs\",\"action\":\"local_ui\",}",
+        "{\"source\":\"sound.rms_dbfs\" \"action\":\"local_ui\"}",
+        "{\"source\":\"sound.rms_dbfs\",\"source\":\"wifi.connected\",\"action\":\"local_ui\"}",
+        "{\"source\":\"sound.rms_dbfs\",\"so\\u0075rce\":\"wifi.connected\",\"action\":\"local_ui\"}",
+        "{\"outer\":{\"source\":\"sound.rms_dbfs\",\"action\":\"local_ui\"}}",
+        "{\"source\":\"sound.rms_dbfs\",\"action\":\"http_post\",\"enabled\":\"true\"}",
+        "{\"source\":\"sound.rms_dbfs\",\"action\":\"http_post\",\"sustain_ms\":-1}",
+        "{\"source\":\"sound.rms_dbfs\",\"action\":\"http_post\",\"cooldown_ms\":01}",
+        "{\"source\":\"sound.rms_dbfs\",\"action\":\"http_post\",\"cooldown_ms\":1.5}",
+        "{\"source\":\"sound.rms_dbfs\",\"action\":\"http_post\",\"cooldown_ms\":2147483648}",
+        "{\"source\":\"sound.rms_dbfs\",\"action\":\"http_post\",\"cooldown_ms\":\"1000\"}",
+        "{\"source\":\"sound.rms_dbfs\",\"action\":\"http_post\",\"http_bearer_token\":false}",
+        "{\"source\":\"sound.rms_dbfs\",\"action\":\"http_post\",\"name\":\"too long a name that exceeds the configured rule name buffer by far\"}",
+        "{\"source\":\"sound.rms_dbfs\",\"action\":\"http_post\",\"name\":\"\\u0000\"}",
+        "{\"source\":\"sound.rms_dbfs\",\"action\":\"http_post\",\"name\":\"\\uD800\"}",
+        "{\"source\":\"sound.rms_dbfs\",\"action\":\"http_post\",\"comparator\":\"bogus\"}",
+        "{\"source\":\"sound.rms_dbfs\",\"action\":\"http_post\",\"threshold_kind\":\"bogus\"}",
+        "{\"source\":\"sound.rms_dbfs\",\"action\":\"http_post\",\"schema_version\":99}",
+        "{\"preset\":\"unknown\"}",
+        "{\"preset\":\"defaults\",\"name\":\"keep\"}",
+        " {\"preset\":\"defaults\"} trailing",
+        "{\"note\":\"\\\"source\\\":\\\"sound.rms_dbfs\\\"\",\"action\":\"local_ui\"}",
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        const size_t callbacks = s_config_changed_count;
+        ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config", invalid[i], response, sizeof(response)));
+        if (strstr(response, "error") == NULL) fprintf(stderr, "accepted invalid config %zu: %s\n", i, invalid[i] ? invalid[i] : "(null)");
+        ASSERT_TRUE(strstr(response, "error") != NULL);
+        ASSERT_EQ_U32(callbacks, s_config_changed_count);
+        ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
+        automation_config_t saved;
+        ASSERT_TRUE(rule_config_store_load(&store, &saved));
+        ASSERT_TRUE(memcmp(&config, &saved, sizeof(config)) == 0);
+    }
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config",
+        " \n{\"source\":\"sound.rms_dbfs\",\"action\":\"http_post\",\"name\":\"\\u00e9\\uD83D\\uDE00\"} \n", response, sizeof(response)));
+    snprintf(config.rules[0].name, RULE_NAME_MAX, "\xc3\xa9\xf0\x9f\x98\x80");
+    ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config",
+        " {\"preset\":\"defaults\"} \n", response, sizeof(response)));
+    automation_config_set_defaults(&config);
+    ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
+    rule_web_stop(&web);
+    rule_config_store_close(&store);
+}
+
+static void test_browser_lcd_roundtrip_preserves_unedited_settings(void)
+{
+    automation_config_t config = preservation_config();
+    rule_runtime_t runtime;
+    rule_config_store_t store;
+    rule_web_t web;
+    ASSERT_TRUE(rule_runtime_init(&runtime, &config));
+    ASSERT_TRUE(rule_config_store_open(&store));
+    ASSERT_TRUE(rule_config_store_save(&store, &config));
+    ASSERT_TRUE(rule_web_start(&web, &runtime, &store));
+    char exported[32768], response[16384];
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_GET, "/api/config", NULL, exported, sizeof(exported)));
+    ui_runtime_t ui;
+    ui_runtime_init(&ui);
+    ASSERT_TRUE(ui_runtime_load_automation(&ui, 0));
+    ui.automations[0].enabled = true;
+    /* An enable edit must not replay stale trigger/action selections. */
+    ui.automations[0].trigger_source = RULE_SOURCE_KEY2_SHORT;
+    ui.automations[0].enabled = true;
+    ui.automations[0].trigger_source = RULE_SOURCE_WIFI_CONNECTED;
+    ui.automations[0].action_kind = RULE_ACTION_LOCAL_UI;
+    ASSERT_TRUE(ui_runtime_save_automation(&ui, 0, UI_AUTOMATION_EDIT_ENABLED));
+    config.rules[0].enabled = true;
+    automation_config_t saved;
+    ASSERT_TRUE(rule_config_store_load(&store, &saved));
+    ASSERT_TRUE(memcmp(&config, &saved, sizeof(config)) == 0);
+    /* Production's config-changed callback reloads the committed LCD edit. */
+    ASSERT_TRUE(rule_runtime_replace_config(&runtime, &saved));
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config", exported, response, sizeof(response)));
+    config.rules[0].enabled = false;
+    ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
+    ASSERT_TRUE(ui_runtime_load_automation(&ui, 0));
+    /* Reselecting an existing type must retain its custom parameters. */
+    ASSERT_TRUE(ui_runtime_save_automation(&ui, 0, UI_AUTOMATION_EDIT_TRIGGER));
+    ASSERT_TRUE(ui_runtime_save_automation(&ui, 0, UI_AUTOMATION_EDIT_ACTION));
+    ASSERT_TRUE(rule_config_store_load(&store, &saved));
+    ASSERT_TRUE(memcmp(&config, &saved, sizeof(config)) == 0);
+    ui.automations[0].enabled = true; /* stale unrelated field */
+    ui.automations[0].action_kind = RULE_ACTION_LOCAL_UI;
+    ui.automations[0].trigger_source = RULE_SOURCE_KEY2_SHORT;
+    ASSERT_TRUE(ui_runtime_save_automation(&ui, 0, UI_AUTOMATION_EDIT_TRIGGER));
+    ASSERT_TRUE(rule_config_store_load(&store, &saved));
+    ASSERT_TRUE(saved.rules[0].enabled == config.rules[0].enabled);
+    ASSERT_TRUE(saved.rules[0].when.source == RULE_SOURCE_KEY2_SHORT);
+    ASSERT_EQ_U32(config.rules[0].cooldown_ms, saved.rules[0].cooldown_ms);
+    ASSERT_TRUE(memcmp(config.rules[0].actions, saved.rules[0].actions, sizeof(config.rules[0].actions)) == 0);
+    ASSERT_TRUE(memcmp(&config.rules[1], &saved.rules[1], sizeof(config.rules[1])) == 0);
+    config = saved;
+    ASSERT_TRUE(ui_runtime_load_automation(&ui, 0));
+    ui.automations[0].enabled = true;
+    ui.automations[0].trigger_source = RULE_SOURCE_WIFI_CONNECTED;
+    ui.automations[0].action_kind = RULE_ACTION_LOCAL_UI;
+    ASSERT_TRUE(ui_runtime_save_automation(&ui, 0, UI_AUTOMATION_EDIT_ACTION));
+    ASSERT_TRUE(rule_config_store_load(&store, &saved));
+    ASSERT_TRUE(saved.rules[0].enabled == config.rules[0].enabled);
+    ASSERT_EQ_U32(2, saved.rules[0].action_count);
+    ASSERT_TRUE(memcmp(&config.rules[0].when, &saved.rules[0].when, sizeof(config.rules[0].when)) == 0);
+    ASSERT_TRUE(memcmp(&config.rules[0].actions[1], &saved.rules[0].actions[1], sizeof(config.rules[0].actions[1])) == 0);
+    ASSERT_TRUE(memcmp(&config.rules[1], &saved.rules[1], sizeof(config.rules[1])) == 0);
+    rule_web_stop(&web);
+    rule_config_store_close(&store);
+}
+
+
 int main(void)
 {
+    test_strict_config_parsing_preserves_runtime_and_store();
+    test_browser_lcd_roundtrip_preserves_unedited_settings();
     test_config_edits_and_roundtrip_preserve_unedited_state();
     test_speaker_form_save_preserves_parameters_and_rejects_wrapped_volume();
     test_export_fits_import_limit_and_oversize_requests_do_not_mutate();

@@ -439,23 +439,77 @@ static bool json_tree_valid(const cJSON *node, unsigned depth, size_t *nodes)
     return true;
 }
 
+/* cJSON accepts some non-JSON number spellings, raw string controls and
+ * arbitrary byte strings. Validate those tokens before allocating its tree;
+ * cJSON still validates document structure and decodes escapes. */
+static bool json_string_token_valid(const char **cursor)
+{
+    const unsigned char *p = (const unsigned char *)*cursor + 1;
+    while (*p != '"') {
+        if (*p < 0x20u) return false;
+        if (*p == '\\') {
+            ++p;
+            if (*p == '\0') return false;
+            if (*p == 'u' && strncmp((const char *)p, "u0000", 5) == 0) return false;
+            ++p;
+        } else if (*p < 0x80u) {
+            ++p;
+        } else {
+            uint32_t codepoint, minimum;
+            unsigned count;
+            if (*p >= 0xc2u && *p <= 0xdfu) { count = 2; codepoint = *p & 0x1fu; minimum = 0x80u; }
+            else if (*p >= 0xe0u && *p <= 0xefu) { count = 3; codepoint = *p & 0x0fu; minimum = 0x800u; }
+            else if (*p >= 0xf0u && *p <= 0xf4u) { count = 4; codepoint = *p & 0x07u; minimum = 0x10000u; }
+            else return false;
+            ++p;
+            for (unsigned i = 1; i < count; ++i, ++p) {
+                if ((*p & 0xc0u) != 0x80u) return false;
+                codepoint = (codepoint << 6) | (*p & 0x3fu);
+            }
+            if (codepoint < minimum || codepoint > 0x10ffffu ||
+                (codepoint >= 0xd800u && codepoint <= 0xdfffu)) return false;
+        }
+    }
+    *cursor = (const char *)p;
+    return true;
+}
+
+static bool json_number_token_valid(const char **cursor)
+{
+    const char *p = *cursor;
+    if (*p == '-') ++p;
+    if (*p == '0') ++p;
+    else {
+        if (*p < '1' || *p > '9') return false;
+        do { ++p; } while (*p >= '0' && *p <= '9');
+    }
+    if (*p == '.') {
+        ++p;
+        if (*p < '0' || *p > '9') return false;
+        do { ++p; } while (*p >= '0' && *p <= '9');
+    }
+    if (*p == 'e' || *p == 'E') {
+        ++p;
+        if (*p == '+' || *p == '-') ++p;
+        if (*p < '0' || *p > '9') return false;
+        do { ++p; } while (*p >= '0' && *p <= '9');
+    }
+    if (*p != '\0' && *p != ',' && *p != '}' && *p != ']' &&
+        *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') return false;
+    *cursor = p - 1;
+    return true;
+}
+
 /* Bound allocations before cJSON builds its tree, including ignored fields.
- * This only counts lexical values; cJSON remains the syntax authority. */
+ * Also validate token spellings; cJSON validates the document structure. */
 static bool json_node_budget_ok(const char *body)
 {
     size_t nodes = 0;
     bool primitive = false;
     for (const char *p = body; *p != '\0'; ++p) {
+        if ((unsigned char)*p < 0x20u && *p != '\t' && *p != '\r' && *p != '\n') return false;
         if (*p == '"') {
-            ++p;
-            while (*p != '\0' && *p != '"') {
-                if (*p == '\\') {
-                    ++p;
-                    if (*p == '\0') return false;
-                }
-                ++p;
-            }
-            if (*p == '\0') return false;
+            if (!json_string_token_valid(&p)) return false;
             const char *next = p + 1;
             while (*next == ' ' || *next == '\t' || *next == '\r' || *next == '\n') ++next;
             if (*next != ':' && ++nodes > 1024) return false;
@@ -467,6 +521,8 @@ static bool json_node_budget_ok(const char *body)
                    *p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
             primitive = false;
         } else if (!primitive) {
+            if ((unsigned char)*p < 0x20u) return false;
+            if ((*p == '-' || (*p >= '0' && *p <= '9')) && !json_number_token_valid(&p)) return false;
             if (++nodes > 1024) return false;
             primitive = true;
         }
@@ -478,12 +534,6 @@ static cJSON *json_parse_object(const char *body)
 {
     if (body == NULL || strlen(body) >= RULE_WEB_MAX_BODY) return NULL;
     if (!json_node_budget_ok(body)) return NULL;
-    /* cJSON uses C strings; a decoded NUL cannot be represented losslessly. */
-    for (const char *p = body; *p != '\0'; ++p) if (*p == '\\') {
-        ++p;
-        if (*p == '\0') return NULL;
-        if (strncmp(p, "u0000", 5) == 0) return NULL;
-    }
     const char *end = NULL;
     cJSON *root = cJSON_ParseWithLengthOpts(body, strlen(body) + 1, &end, true);
     size_t nodes = 0;
@@ -754,6 +804,10 @@ static bool parse_json_rule(automation_rule_t *rule, const cJSON *object)
     char kind[8];
     (void)snprintf(kind, sizeof(kind), "%s", rule->when.threshold.kind == RULE_VALUE_I32 ? "i32" : "bool");
     if (!json_read_string(object, "threshold_kind", kind, sizeof(kind))) return false;
+    int64_t checked_i32 = 0;
+    bool checked_bool = false;
+    if (!json_read_integer(object, "threshold_i32", INT32_MIN, INT32_MAX, &checked_i32) ||
+        !json_read_bool(object, "threshold_bool", &checked_bool)) return false;
     if (strcmp(kind, "i32") == 0) {
         int64_t n = rule->when.threshold.kind == RULE_VALUE_I32 ? rule->when.threshold.as.i32_value : 0;
         if (!json_read_integer(object, "threshold_i32", INT32_MIN, INT32_MAX, &n)) return false;
@@ -763,6 +817,19 @@ static bool parse_json_rule(automation_rule_t *rule, const cJSON *object)
         if (!json_read_bool(object, "threshold_bool", &value)) return false;
         rule->when.threshold = rule_value_bool(value);
     } else return false;
+    /* The exporter includes inactive GPIO fields too; their types must still
+     * be valid rather than silently accepting a malformed form submission. */
+    int64_t checked_pin = rule->when.gpio.pin;
+    bool checked_active_low = rule->when.gpio.active_low;
+    uint32_t checked_debounce = rule->when.gpio.debounce_ms;
+    char checked_profile[32];
+    (void)snprintf(checked_profile, sizeof(checked_profile), "%s", gpio_profile_name(rule->when.gpio.profile));
+    rule_gpio_profile_t parsed_profile;
+    if (!json_read_integer(object, "gpio_pin", RULE_GPIO_UNUSED_PIN, 48, &checked_pin) ||
+        !json_read_bool(object, "gpio_active_low", &checked_active_low) ||
+        !json_read_u32(object, "gpio_debounce_ms", &checked_debounce) ||
+        !json_read_string(object, "gpio_profile", checked_profile, sizeof(checked_profile)) ||
+        (strcmp(checked_profile, "none") != 0 && !gpio_profile_from_name(checked_profile, &parsed_profile))) return false;
     if (rule_source_is_gpio(source)) {
         int64_t pin = rule->when.gpio.pin;
         char profile[32];
@@ -789,7 +856,8 @@ static bool make_json_config(automation_config_t *config, const char *body, cons
 {
     cJSON *root = json_parse_object(body);
     if (root == NULL) return false;
-    bool ok = json_read_u32(root, "schema_version", &config->schema_version) && config->schema_version == RULE_CONFIG_SCHEMA_VERSION;
+    bool ok = cJSON_GetObjectItemCaseSensitive(root, "preset") == NULL &&
+              json_read_u32(root, "schema_version", &config->schema_version) && config->schema_version == RULE_CONFIG_SCHEMA_VERSION;
     const cJSON *rules = cJSON_GetObjectItemCaseSensitive(root, "rules");
     if (ok && rules != NULL) {
         const int count = cJSON_GetArraySize(rules);
@@ -861,11 +929,19 @@ static void make_preset_config(automation_config_t *config, const char *preset)
 
 static const char *config_preset_from_body(const char *body)
 {
-    if (body == NULL || body[0] == '\0' || strcmp(body, "defaults") == 0) return "defaults";
+    if (body == NULL || body[0] == '\0') return NULL;
     static const char *presets[] = {"defaults", "loud_sound_local_ui", "sound_local_ui", "button_local_ui"};
     char requested[32] = {0};
-    if (!json_get_string(body, "preset", requested, sizeof(requested))) {
-        (void)snprintf(requested, sizeof(requested), "%s", body);
+    cJSON *object = json_parse_object(body);
+    if (object != NULL) {
+        const cJSON *field = cJSON_GetObjectItemCaseSensitive(object, "preset");
+        const bool valid = field != NULL && object->child == field && field->next == NULL &&
+                           json_read_string(object, "preset", requested, sizeof(requested));
+        cJSON_Delete(object);
+        if (!valid) return NULL;
+    } else {
+        if (strlen(body) >= sizeof(requested)) return NULL;
+        memcpy(requested, body, strlen(body) + 1);
     }
     for (size_t i = 0; i < sizeof(presets) / sizeof(presets[0]); ++i) if (strcmp(requested, presets[i]) == 0) return presets[i];
     return NULL;

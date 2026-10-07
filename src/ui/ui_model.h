@@ -101,4 +101,11 @@ void ui_runtime_refresh_status_bar(ui_runtime_t *ui);
 void ui_runtime_refresh_bluetooth(ui_runtime_t *ui);
 bool ui_runtime_load_ap_config(ui_runtime_t *ui);
 bool ui_runtime_load_automation(ui_runtime_t *ui, uint8_t automation_index);
-bool ui_runtime_save_automation(ui_runtime_t *ui, uint8_t automation_index);
+typedef enum {
+    UI_AUTOMATION_EDIT_ENABLED = 0,
+    UI_AUTOMATION_EDIT_TRIGGER,
+    UI_AUTOMATION_EDIT_ACTION,
+} ui_automation_edit_t;
+
+/* Apply only the selected field to the latest stored configuration. */
+bool ui_runtime_save_automation(ui_runtime_t *ui, uint8_t automation_index, ui_automation_edit_t edit);
