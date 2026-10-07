@@ -15,6 +15,16 @@ These values are intentionally documented before feature work so later changes a
 
 The current route table already consumes the 17 registered URI-handler slots, so Phase 1 ships as a single generated HTML document instead of adding CSS/JS asset routes. The HTTP server is not a boot-time resident service: the LCD Web UI Wi-Fi/AP entry flows start it only after network connectivity is available, and backing out of the Web UI result/URL screens stops it so the HTTP server task, stack, handler table, and heap allocations are released.
 
+### Internal RAM for deferred HTTP startup
+
+`ESP_ERR_HTTPD_TASK` means ESP-IDF failed to create the HTTP task; no HTTP listener remains after that failure. Its 8,192-byte stack stays in internal RAM because configuration handlers write NVS and flash operations can disable the PSRAM cache. The 8 MiB PSRAM total in the boot log does not establish that a sufficiently large internal block is available.
+
+The StickS3 defaults prefer PSRAM for ordinary allocations above 1,024 bytes, reserve 98,304 bytes of internal memory for internal/DMA allocations, and place NimBLE host dynamic allocations in PSRAM through ESP-IDF's supported allocation mode. This preserves headroom alongside the LCD's 64,800-byte internal DMA framebuffer and the Wi-Fi/BLE/runtime tasks; it does not allocate a resident HTTP stack while the Web UI is disabled. The reserve is shared by internal/DMA users, not a dedicated HTTP pool, so physical measurements remain necessary.
+
+HTTP startup and failures log internal free bytes, the largest free internal block, the minimum free internal heap, and PSRAM free bytes. A task needs a contiguous stack allocation plus internal task metadata; free PSRAM cannot satisfy this requirement. On hardware, verify boot, BLE operation, Web UI open/close/reopen, configuration save/import, and startup while audio capture is active.
+
+Existing `sdkconfig` files retain their previous values when defaults change. For an existing build, set `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024`, `CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=98304`, and select `CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y` in menuconfig, or use a fresh build configuration loaded from `config/sdkconfig.defaults`. Rebuild and flash the firmware before retesting.
+
 ## Accepted budgets
 
 | Budget | Target | Hard ceiling | Enforcement |

@@ -40,6 +40,13 @@ CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 
+## The LCD framebuffer needs 64,800 bytes of internal DMA RAM, and Wi-Fi,
+## BLE and task stacks also need internal RAM. Keep ordinary larger allocations
+## in PSRAM and reserve internal headroom for the deferred 8 KiB HTTP task.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=98304
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
+
 ## Avoid first-boot RF calibration load warnings on freshly erased NVS by using
 ## full RF calibration instead of trying to load missing partial-calibration data.
 CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE=n
