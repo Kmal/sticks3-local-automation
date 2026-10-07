@@ -38,6 +38,7 @@
 #include "rule_runtime.h"
 #include "rule_web.h"
 #include "status_ui.h"
+#include "ui_model.h"
 #if CONFIG_APP_USB_UAC_DEVICE
 #include "uac_service.h"
 #endif
@@ -540,17 +541,19 @@ static void key2_pressed_cb(void *ctx)
     app_emit_button_rule_fact(BUTTON_STATE_EVENT_KEY2_SHORT);
 }
 
-static void automation_config_changed_cb(void *ctx)
+static bool app_commit_stored_config(const automation_config_t *config, void *ctx)
+{
+    return rule_config_store_save((rule_config_store_t *)ctx, config);
+}
+
+/* Caller holds s_rule_mutex across load, edit, preparation and commit. */
+static bool app_lcd_config_commit(const automation_config_t *config, rule_config_store_t *store, void *ctx)
 {
     (void)ctx;
-    automation_config_t *config = malloc(sizeof(*config));
-    if (config == NULL) return;
-    if (!s_rule_runtime_ready || s_rule_mutex == NULL) { free(config); return; }
-    (void)xSemaphoreTake(s_rule_mutex, portMAX_DELAY);
-    if (rule_config_store_load(&s_rule_store, config) && rule_runtime_replace_config(&s_rule_runtime, config)) s_rule_config = *config;
-    else ESP_LOGW(TAG, "automation update: runtime refresh failed");
-    xSemaphoreGive(s_rule_mutex);
-    free(config);
+    if (!s_rule_runtime_ready || !rule_runtime_replace_config_with_commit(
+            &s_rule_runtime, config, app_commit_stored_config, store)) return false;
+    s_rule_config = *config;
+    return true;
 }
 
 static void app_rule_web_config_changed_cb(const automation_config_t *config, void *ctx)
@@ -593,12 +596,16 @@ static void app_web_ui_service_changed(bool enabled, void *ctx)
         return;
     }
 
+    /* httpd_stop waits for handlers, which may need the rule mutex. */
+    const bool stopping = !enabled && s_rule_web.started;
+    if (stopping) rule_web_stop(&s_rule_web);
     if (s_rule_mutex != NULL) {
         (void)xSemaphoreTake(s_rule_mutex, portMAX_DELAY);
     }
     if (enabled) {
         if (!s_rule_web.started && rule_web_start_locked(&s_rule_web, &s_rule_runtime, &s_rule_store,
                                                        app_rule_web_runtime_lock, app_rule_web_runtime_unlock, s_rule_mutex)) {
+            status_ui_set_web_access_code(s_rule_web.access_token);
             rule_web_set_config_changed_callback(&s_rule_web, app_rule_web_config_changed_cb, NULL);
 #if CONFIG_APP_SOUND_LEVEL_TRIGGERS
             app_sound_level_demand_set_telemetry(&s_sound_level_demand, true);
@@ -613,8 +620,8 @@ static void app_web_ui_service_changed(bool enabled, void *ctx)
             ESP_LOGE(TAG, "web UI server failed to start");
         }
     } else {
-        if (s_rule_web.started) {
-            rule_web_stop(&s_rule_web);
+        if (stopping) {
+            status_ui_set_web_access_code(NULL);
 #if CONFIG_APP_SOUND_LEVEL_TRIGGERS
             app_sound_level_demand_set_telemetry(&s_sound_level_demand, false);
 #endif
@@ -645,7 +652,7 @@ void app_main(void)
     const status_ui_button_handlers_t status_handlers = {
         .key1_pressed = key1_pressed_cb,
         .key2_pressed = key2_pressed_cb,
-        .automation_config_changed = automation_config_changed_cb,
+        .automation_config_changed = NULL,
         .service_enabled_changed = app_web_ui_service_changed,
     };
 
@@ -674,6 +681,9 @@ void app_main(void)
         status_ui_set_state(STATUS_UI_STATE_ERROR);
         app_idle_forever();
     }
+
+    ui_runtime_set_config_transaction(app_rule_web_runtime_lock, app_rule_web_runtime_unlock,
+                                      app_lcd_config_commit, s_rule_mutex);
 
 #if CONFIG_APP_USB_UAC_DEVICE
     ESP_LOGI(TAG, "app_main: USB Audio Class init start");

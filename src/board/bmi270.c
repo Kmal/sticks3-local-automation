@@ -1,9 +1,14 @@
 #include "bmi270.h"
 
 #include "register_bus.h"
+#include "bmi270_config.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include <stdlib.h>
 #include <string.h>
+
+_Static_assert(sizeof(bmi270_config_file) == 8192, "BMI270 configuration size");
 
 #define BMI270_REG_CHIP_ID 0x00
 #define BMI270_CHIP_ID 0x24
@@ -37,14 +42,32 @@ esp_err_t bmi270_init(i2c_port_t port, uint8_t addr)
     if (chip_id != BMI270_CHIP_ID) {
         return ESP_ERR_INVALID_RESPONSE;
     }
-    /* BMI270 datasheet normal-power polling examples disable advanced power
-     * save (PWR_CONF=0x02) before reading DATA_8..DATA_13 with the
-     * high-performance accelerometer filter. Keep this polling-only; do not
-     * configure BMI270 interrupts or the StickS3 M5PM1 IMU interrupt GPIO. */
-    err = register_bus_write_u8(port, addr, BMI270_REG_PWR_CONF, BMI270_PWR_CONF_NORMAL);
-    if (err != ESP_OK) {
-        return err;
+    /* Bosch datasheet section 4.4: initialize after every POR/soft reset.
+     * Chunk addresses are WORD offsets, not incrementing register addresses. */
+    err = register_bus_write_u8(port, addr, 0x7e, 0xb6);
+    if (err != ESP_OK) return err;
+    vTaskDelay(pdMS_TO_TICKS(5) + 1);
+    err = register_bus_write_u8(port, addr, BMI270_REG_PWR_CONF, 0x00);
+    if (err != ESP_OK) return err;
+    vTaskDelay(pdMS_TO_TICKS(1) + 1); /* >=450 us even with coarse RTOS ticks */
+    err = register_bus_write_u8(port, addr, 0x59, 0x00);
+    if (err != ESP_OK) return err;
+    for (size_t offset = 0; offset < sizeof(bmi270_config_file); offset += 32) {
+        uint8_t address[2] = {(uint8_t)((offset / 2) & 0x0f), (uint8_t)(offset >> 5)};
+        err = register_bus_write(port, addr, 0x5b, address, sizeof(address));
+        if (err != ESP_OK) return err;
+        err = register_bus_write(port, addr, 0x5e, bmi270_config_file + offset, 32);
+        if (err != ESP_OK) return err;
     }
+    err = register_bus_write_u8(port, addr, 0x59, 0x01);
+    if (err != ESP_OK) return err;
+    vTaskDelay(pdMS_TO_TICKS(20) + 1);
+    uint8_t status = 0;
+    err = register_bus_read_u8(port, addr, 0x21, &status);
+    if (err != ESP_OK) return err;
+    if ((status & 0x0f) != 0x01) return ESP_ERR_INVALID_RESPONSE;
+    err = register_bus_write_u8(port, addr, BMI270_REG_PWR_CONF, BMI270_PWR_CONF_NORMAL);
+    if (err != ESP_OK) return err;
     err = register_bus_write_u8(port, addr, BMI270_REG_ACC_CONF, BMI270_ACC_CONF_ODR_100HZ_BWP_NORMAL_AVG4);
     if (err != ESP_OK) {
         return err;

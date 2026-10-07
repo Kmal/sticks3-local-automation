@@ -57,7 +57,7 @@ The code-derived capability overlay is grouped by how the rule runtime uses each
 | --- | --- | --- |
 | BLE rule-event notifications | ✅ Implemented/wired | `ble_message` actions dispatch through `transport_ble_send_rule_event()` when the BLE transport is built. |
 | HTTP POST action | ✅ Implemented/wired | Dispatch uses `esp_http_client` when network readiness is true. |
-| NEC IR send action | ✅ Implemented/wired | Dispatch uses the RMT TX path on the configured IR TX GPIO. |
+| NEC IR send action | ✅ Implemented/wired | Dispatch uses the RMT TX path with NEC repeat timing and a measured EXT_5V supply check; absent/unreadable supply fails closed without changing rail direction. |
 | Local UI action | ✅ Implemented/wired | Dispatch sets the status UI ready state. |
 | Speaker tone action | ✅ Implemented/Kconfig-gated | `speaker_tone` validates bounded frequency/duration/volume parameters, uses the playback-only ES8311/I2S speaker path and temporarily stops microphone capture before playback, and enables the M5PM1 PYG3 speaker amplifier only while playback is active. |
 | HAT actions | ⛔ Not implemented / fail-closed | Capabilities report HAT actions disabled and HAT actions are rejected/unsupported by the dispatcher. |
@@ -82,9 +82,9 @@ The code-derived capability overlay is grouped by how the rule runtime uses each
 
 ### Rule delivery and configuration correctness
 
-Short button presses are discrete events: each press rearms evaluation while preserving cooldown. The action queue admits all of one rule's actions as one job, with eight jobs covering an empty-queue burst of eight rules and up to 24 actions. When full, a job is rejected as a whole, `enqueue_errors` reports rejected actions, and the engine does not advance that rule's fire count, cooldown timestamp, or event sequence. A level source can retry on its next fact; a rejected button event requires another press. Rejected work is not retained in an unbounded backlog.
+Short button presses are discrete events: each press rearms evaluation while preserving cooldown. Each action queue admits all of one rule's actions as one job, with eight jobs covering an empty-queue burst of eight rules and up to 24 actions. Local-only rules use a local worker; any rule containing HTTP uses a separate network worker, preserving ordering within that rule. Hardware callbacks are serialized across workers without holding their mutex during HTTP. Ordering across the two lanes is not guaranteed. When full, a job is rejected as a whole, `enqueue_errors` reports rejected actions, and the engine does not advance that rule's fire count, cooldown timestamp, or event sequence. A level source can retry on its next fact; a rejected button event requires another press. Rejected work is not retained in an unbounded backlog.
 
-The current Web UI edits the first rule and its first action. Ordinary saves and configuration JSON round trips preserve other rules, additional actions, omitted timing/speaker settings, and omitted or masked HTTP credentials. An explicit empty token in JSON clears it. Exported JSON is a complete rule/action snapshot with masked secrets. The bounded request cap is 32,768 bytes so these snapshots fit the real HTTP import route. Explicit defaults/preset requests still replace the configuration. Validation and GPIO preparation precede persistence; the runtime is updated only after persistence succeeds.
+The current Web UI edits the first rule and its first action. Ordinary saves and configuration JSON round trips preserve other rules, additional actions, omitted timing/speaker settings, and omitted or masked HTTP credentials. An explicit empty token in JSON clears it. Exported JSON is a complete rule/action snapshot with masked secrets. The bounded request cap is 32,768 bytes so these snapshots fit the real HTTP import route. Explicit defaults/preset requests still replace the configuration. Validation and GPIO preparation precede persistence; the runtime is updated only after persistence succeeds. LCD edits use the same transaction mutex and commit path as web edits. A successful config POST returns `{"ok":true}`; clients fetch the resulting snapshot separately with GET.
 
 Startup reports an error unless the rule mutex, core runtime, and all required producer tasks start successfully. Partially created producer tasks and the action worker are stopped on task-allocation failure, and automation/Web UI work is blocked while startup is incomplete.
 
@@ -103,7 +103,7 @@ The default firmware includes capture-only sound-level telemetry for local autom
 
 ### Wi-Fi and web UI
 
-`CONFIG_APP_WIFI_ENABLE=y` starts Wi-Fi during boot. The firmware attempts saved station credentials and can fall back to the configured setup AP name, which defaults to `M5StickS3-Setup`. `CONFIG_APP_WIFI_KEYBOARD_PROVISIONING` defaults to `n` so the LCD stays in the normal dashboard/menu hierarchy at boot; when enabled, the LCD keyboard can collect Wi-Fi credentials before AP fallback.
+`CONFIG_APP_WIFI_ENABLE=y` starts Wi-Fi during boot. The firmware attempts saved station credentials and can fall back to the configured setup AP name, which defaults to `M5StickS3-Setup`; AP startup requires a configured WPA2 password of 8–63 characters. `CONFIG_APP_WIFI_KEYBOARD_PROVISIONING` defaults to `n` so the LCD stays in the normal dashboard/menu hierarchy at boot; when enabled, the LCD keyboard can collect Wi-Fi credentials before AP fallback.
 
 To conserve RAM, the HTTP Web UI server is not started automatically at boot. It starts only from the on-device **Web UI** entry: **Wi-Fi Mode** enables it after station Wi-Fi is connected, and **AP Mode** enables it after AP startup succeeds. It is stopped again when the user backs out of the Web UI Wi-Fi result screen or AP URL screen to `Main`; stopping the server releases the ESP-IDF HTTP server task, handler table, stack, and related heap allocations. The standalone **Connect to Wi-Fi** flow only saves station credentials and does not start or stop the Web UI service.
 
@@ -111,7 +111,7 @@ When enabled, the web server exposes a small local configuration UI at `/` plus 
 
 | Endpoint | Method | Current purpose |
 | --- | --- | --- |
-| `/api/status` | GET | Rule/web status, last action result, HTTP network readiness, and Wi-Fi status. |
+| `/api/status` | GET | Rule/web status, last action result, HTTP network readiness, Wi-Fi status, heap/stack margins, queue depths, and rejected-action count. |
 | `/api/time` | GET/POST | Read or update the configured timezone used by the status UI clock. |
 | `/api/capabilities` | GET | Supported/disabled trigger sources, actions, GPIO profiles, HAT placeholders, and pin-conflict classes. |
 | `/api/config` | GET/POST | Read/import all rules and actions; flat form edits preserve other settings; presets explicitly replace the config. |
@@ -119,7 +119,7 @@ When enabled, the web server exposes a small local configuration UI at `/` plus 
 | `/api/wifi/scan` | POST | Scan nearby Wi-Fi networks. |
 | `/api/wifi/connect` | POST | Connect and persist station credentials. |
 | `/api/wifi/forget` | POST | Forget saved station credentials. |
-| `/api/wifi/ap` | POST | Start AP mode with a configurable AP name, optional password, and channel. |
+| `/api/wifi/ap` | POST | Start AP mode with a configurable AP name, required WPA2 password (8–63 characters), and channel. |
 | `/api/wifi/mode` | POST | Select Wi-Fi, AP, AP+Wi-Fi, or off mode. |
 | `/api/rules/test` | POST | Inject a test fact through the current rule runtime. |
 | `/api/gpio/test` | POST | Validate a candidate GPIO rule/config against safe-pin rules. |
@@ -206,9 +206,11 @@ Settings is organized as shallow branch menus so the LCD navigation stack stays 
 
 The standalone `Connect to Wi-Fi` station flow supports the same scan/manual credential entry and persistence, but it does not enable the HTTP Web UI server. Selecting a highlighted SSID tries the stored password when the selected SSID matches saved credentials; the bottom 9-key password input overlay is shown only when no password is stored or the saved password fails with a password-related authentication/handshake reason. Hidden networks use `Hidden / Manual SSID`, which opens SSID input first and then follows the same saved-password/enter-password logic. Successful manual password entry persists the credentials.
 
-AP setup for the Web UI is under `Web UI > AP Mode`, where the device can set AP name/password/channel, start AP mode, enable the HTTP Web UI server, and show the AP URL. Long-press/back from the Web UI Wi-Fi result screen or AP URL screen returns to `Main` and disables the Web UI service, stopping the HTTP server to free its RAM resources.
+All HTTP API requests require the rotating 16-character code shown on the device, supplied in the `X-Device-Token` header. Enter it in the browser unlock form. Five failed requests lock access until Web UI is physically reopened; stopping the service clears the code. HTTP remains unencrypted, so station mode requires a trusted network.
 
-The browser Web UI still exposes the HTTP Wi-Fi endpoints listed above for station/AP setup from a phone or desktop browser while the Web UI service is enabled. On boot, saved station credentials are tried first; if station connection fails, the firmware can start AP mode for setup, but the HTTP server remains deferred until the user explicitly enters Web UI Wi-Fi/AP mode. Short browser form fields center-align their contents so SSIDs, passwords, AP names, channels, and timezone selections remain readable on phone-sized screens; large text/status blocks remain left-aligned for JSON and logs.
+AP setup for the Web UI is under `Web UI > AP Mode`, where the device can set AP name/password/channel, start AP mode, enable the HTTP Web UI server, and show the AP URL and session code. Blank AP passwords cannot start an AP; set an 8–63-character password on the LCD first. Long-press/back from the Web UI Wi-Fi result screen or AP URL screen returns to `Main` and disables the Web UI service, stopping the HTTP server to free its RAM resources.
+
+The browser Web UI still exposes the HTTP Wi-Fi endpoints listed above for station/AP setup from a phone or desktop browser while the Web UI service is enabled. On boot, saved station credentials are tried first; if station connection fails, the firmware can start AP mode for setup if a valid AP password has been configured, but the HTTP server remains deferred until the user explicitly enters Web UI Wi-Fi/AP mode. Short browser form fields center-align their contents so SSIDs, passwords, AP names, channels, and timezone selections remain readable on phone-sized screens; large text/status blocks remain left-aligned for JSON and logs.
 
 LCD flow uses the onboard buttons when the menu is open:
 
@@ -399,3 +401,5 @@ ESP-IDF build/flash validation still requires an ESP-IDF environment and attache
 Global sensor-monitoring rule: firmware must initialize and monitor a sensor only while an explicit demand source needs it. For GPIO this is enabled-rule source usage; for sound capture this is the union of enabled `sound.*` automation rules and Web UI telemetry. If neither trigger nor telemetry demand is active, the producer must stay stopped and release its runtime RAM/task resources. Future sensor producers should keep demand sources explicit and avoid duplicate readers.
 
 Runtime capture starts only while shared demand is active. Sound-level triggers are enabled in the checked-in defaults with `CONFIG_APP_SOUND_LEVEL_TRIGGERS=y`. This links `audio_metrics.c`, `board_audio.c`, `board_audio_clock.c`, `board_audio_power.c`, `board_i2s.c`, `es8311.c`, and `sound_level_service.c`. To honor demand-driven sensor monitoring, the firmware allocates the sound service state and initializes the StickS3 ES8311 microphone path with `BOARD_AUDIO_PROFILE_CAPTURE_ONLY` only while shared sound demand is active. Enabled `sound.*` rules consume live `sound.rms_dbfs`, `sound.peak_dbfs`, and `sound.clipped` facts through the existing automation runtime, and Web UI telemetry reads the same service status/last-metrics path without starting a second I2S reader. Maintainers can still turn the Kconfig option off for audio-free builds.
+
+See [the confirmed reliability review](confirmed_reliability_review.md) for source-backed initialization, transaction, queue, memory, IR, and session fixes and their qualification limits.

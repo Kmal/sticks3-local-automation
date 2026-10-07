@@ -10,6 +10,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
+#include <stdatomic.h>
 #endif
 
 #define ACTION_DISPATCHER_QUEUE_LEN 8u
@@ -38,14 +40,19 @@ typedef struct {
     bool started;
 #ifdef ESP_PLATFORM
     portMUX_TYPE result_lock;
+    SemaphoreHandle_t local_execution_lock;
+    QueueHandle_t network_queue_handle;
+    TaskHandle_t network_worker_task;
     QueueHandle_t queue_handle;
     TaskHandle_t worker_task;
-    bool stop_requested;
+    atomic_bool stop_requested;
 #else
     action_job_t queue[ACTION_DISPATCHER_QUEUE_LEN];
     size_t head;
     size_t tail;
     size_t count;
+    action_job_t network_queue[ACTION_DISPATCHER_QUEUE_LEN];
+    size_t network_head, network_tail, network_count;
 #endif
     action_result_t last_result;
     action_dispatcher_send_cb_t ble_send;

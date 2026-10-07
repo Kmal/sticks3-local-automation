@@ -33,3 +33,28 @@ assert(!Object.hasOwn(JSON.parse(vm.runInContext('body()', context)), 'http_bear
 document.getElementById('http_bearer_token').value = 'replacement';
 assert.equal(JSON.parse(vm.runInContext('body()', context)).http_bearer_token, 'replacement');
 console.log('webui rendering and credential tests passed');
+
+(async () => {
+  let requests = [];
+  context.fetch = async (url, options) => {
+    requests.push({url, options});
+    return {ok:true, text:async()=>'{"ok":true}'};
+  };
+  await assert.rejects(vm.runInContext("api('/api/status')", context), /Device code required/);
+  assert.equal(requests.length, 0);
+  vm.runInContext("deviceToken='0123456789abcdef'", context);
+  await vm.runInContext("api('/api/status')", context);
+  assert.equal(requests[0].options.headers['X-Device-Token'], '0123456789abcdef');
+  requests = [];
+  context.fetch = async (url, options) => {
+    requests.push({url, options});
+    const result = options.method === 'POST' ? {ok:true} : {rules:[]};
+    return {ok:true, text:async()=>JSON.stringify(result)};
+  };
+  await document.getElementById('save_config').onclick();
+  assert.equal(requests[0].url, '/api/config');
+  assert.equal(requests[0].options.method, 'POST');
+  assert.equal(requests[1].url, '/api/config');
+  assert.notEqual(requests[1].options.method, 'POST');
+  console.log('webui session header and save acknowledgement tests passed');
+})().catch(error => { console.error(error); process.exitCode = 1; });

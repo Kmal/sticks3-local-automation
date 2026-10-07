@@ -107,15 +107,40 @@ static void test_speaker_tone_action_validation_and_playback(void)
 
 static void test_ir_and_hat_are_bounded_or_disabled(void)
 {
-    action_ir_config_t ir = {.protocol = RULE_IR_PROTOCOL_NEC, .carrier_hz = 38000, .repeat_count = 2, .timeout_ms = 100};
+    action_ir_config_t ir = {.protocol = RULE_IR_PROTOCOL_NEC, .carrier_hz = 38000, .repeat_count = 2, .timeout_ms = 250};
     ASSERT_TRUE(action_ir_validate(&ir));
     ir.repeat_count = 99;
     ASSERT_FALSE(action_ir_validate(&ir));
     ASSERT_FALSE(hat_operation_supported(RULE_HAT_OPERATION_RELAY_SET));
 }
 
+static void test_nec_repeat_period_and_payload(void)
+{
+    action_ir_config_t config = {.protocol=RULE_IR_PROTOCOL_NEC, .carrier_hz=38000, .timeout_ms=250, .address=0x59, .command=0x16};
+    action_ir_symbol_t symbols[35];
+    for (unsigned repeat = 0; repeat < 2; ++repeat) {
+        size_t n = action_ir_encode_nec(&config, repeat != 0, symbols, 35);
+        ASSERT_EQ(repeat ? 3 : 35, n);
+        unsigned duration = 0;
+        for (size_t i = 0; i < n; ++i) {
+            ASSERT_TRUE(symbols[i].high_us <= 32767 && symbols[i].low_us <= 32767);
+            duration += symbols[i].high_us + symbols[i].low_us;
+        }
+        ASSERT_EQ(110000, duration);
+        ASSERT_EQ(9000, symbols[0].high_us);
+        ASSERT_EQ(repeat ? 2250 : 4500, symbols[0].low_us);
+        if (!repeat) {
+            uint32_t payload = 0;
+            for (size_t i = 0; i < 32; ++i) if (symbols[i+1].low_us == 1690) payload |= 1u << i;
+            ASSERT_TRUE(payload == 0xe916a659u);
+        }
+    }
+    ASSERT_EQ(0, action_ir_encode_nec(&config, false, symbols, 34));
+}
+
 int main(void)
 {
+    test_nec_repeat_period_and_payload();
     test_http_json_and_not_ready();
     test_ir_and_hat_are_bounded_or_disabled();
     test_speaker_tone_action_validation_and_playback();
