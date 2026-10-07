@@ -181,8 +181,60 @@ static void test_local_ui_callback_action(void)
     ASSERT_EQ(RULE_ACTION_LOCAL_UI, action_dispatcher_get_last_result(&dispatcher).action);
 }
 
+static void test_network_backlog_does_not_block_local_jobs(void)
+{
+    action_dispatcher_t dispatcher; ASSERT_TRUE(action_dispatcher_start(&dispatcher));
+    action_dispatcher_set_http_sender(&dispatcher, fake_http_sender, NULL);
+    for (unsigned i = 0; i < ACTION_DISPATCHER_QUEUE_LEN; ++i) {
+        rule_event_t http = event_with_action(RULE_ACTION_HTTP_POST, i+1);
+        ASSERT_TRUE(action_enqueue(&dispatcher, &http));
+    }
+    rule_event_t local = event_with_action(RULE_ACTION_LOCAL_UI, 99);
+    ASSERT_TRUE(action_enqueue(&dispatcher, &local));
+    ASSERT_TRUE(action_dispatcher_process_one(&dispatcher));
+    ASSERT_EQ(99, action_dispatcher_get_last_result(&dispatcher).sequence);
+    ASSERT_EQ(ACTION_DISPATCHER_QUEUE_LEN, dispatcher.network_count);
+    ASSERT_EQ(ACTION_DISPATCHER_QUEUE_LEN, action_dispatcher_process_all(&dispatcher));
+    action_dispatcher_stop(&dispatcher);
+}
+
+static uint32_t ordered_sequences[3];
+static size_t ordered_count;
+static action_result_t capture_order(const rule_event_t *event, void *ctx)
+{
+    (void)ctx;
+    ASSERT_TRUE(ordered_count < 3);
+    ordered_sequences[ordered_count++] = event->sequence;
+    return fake_http_sender(event, NULL);
+}
+static void test_mixed_job_preserves_order_and_whole_admission(void)
+{
+    action_dispatcher_t dispatcher;
+    ASSERT_TRUE(action_dispatcher_start(&dispatcher));
+    action_dispatcher_set_http_sender(&dispatcher, capture_order, NULL);
+    action_dispatcher_set_local_ui_sender(&dispatcher, capture_order, NULL);
+    rule_event_batch_t job = {.event_count = 3};
+    job.events[0] = event_with_action(RULE_ACTION_LOCAL_UI, 1);
+    job.events[1] = event_with_action(RULE_ACTION_HTTP_POST, 2);
+    job.events[2] = event_with_action(RULE_ACTION_LOCAL_UI, 3);
+    ASSERT_TRUE(action_enqueue_batch(&dispatcher, &job));
+    ASSERT_EQ(0, dispatcher.count);
+    ASSERT_EQ(1, dispatcher.network_count);
+    ordered_count = 0;
+    ASSERT_TRUE(action_dispatcher_process_one(&dispatcher));
+    ASSERT_EQ(3, ordered_count);
+    for (unsigned i = 0; i < 3; ++i) ASSERT_EQ(i+1, ordered_sequences[i]);
+    for (unsigned i = 0; i < ACTION_DISPATCHER_QUEUE_LEN; ++i)
+        ASSERT_TRUE(action_enqueue_batch(&dispatcher, &job));
+    ASSERT_FALSE(action_enqueue_batch(&dispatcher, &job));
+    ASSERT_EQ(ACTION_DISPATCHER_QUEUE_LEN, dispatcher.network_count);
+    action_dispatcher_stop(&dispatcher);
+}
+
 int main(void)
 {
+    test_network_backlog_does_not_block_local_jobs();
+    test_mixed_job_preserves_order_and_whole_admission();
     test_not_started_and_queue_full();
     test_process_local_ui_and_unsupported();
     test_ble_callback_action();

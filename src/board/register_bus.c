@@ -100,6 +100,19 @@ esp_err_t register_bus_probe(i2c_port_t port, uint8_t dev_addr)
     return i2c_master_probe(bus_handle, dev_addr, REGISTER_BUS_TIMEOUT_MS);
 }
 
+/* Bounded burst writes for sensor configuration uploads. */
+esp_err_t register_bus_write(i2c_port_t port, uint8_t dev_addr, uint8_t reg, const uint8_t *data, size_t len)
+{
+    if (data == NULL || len == 0 || len > 32) return ESP_ERR_INVALID_ARG;
+    i2c_master_dev_handle_t dev_handle = NULL;
+    esp_err_t err = register_bus_get_device(port, dev_addr, &dev_handle);
+    if (err != ESP_OK) return err;
+    uint8_t tx[33];
+    tx[0] = reg;
+    for (size_t i = 0; i < len; ++i) tx[i + 1] = data[i];
+    return i2c_master_transmit(dev_handle, tx, len + 1, REGISTER_BUS_TIMEOUT_MS);
+}
+
 esp_err_t register_bus_write_u8(i2c_port_t port, uint8_t dev_addr, uint8_t reg, uint8_t value)
 {
     i2c_master_dev_handle_t dev_handle = NULL;

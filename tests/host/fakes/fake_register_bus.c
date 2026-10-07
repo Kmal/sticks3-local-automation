@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <string.h>
 
-#define MAX_OPS 256
+#define MAX_OPS 12000
 static uint8_t s_regs[128][256];
 static fake_bus_op_t s_ops[MAX_OPS];
 static size_t s_op_count;
@@ -56,6 +56,17 @@ static void record(fake_bus_op_type_t type, uint8_t addr, uint8_t reg, uint8_t v
     if (s_op_count < MAX_OPS) {
         s_ops[s_op_count++] = (fake_bus_op_t){.type = type, .addr = addr, .reg = reg, .value = value};
     }
+}
+
+esp_err_t register_bus_write(i2c_port_t port, uint8_t addr, uint8_t reg, const uint8_t *data, size_t len)
+{
+    if (data == NULL || len == 0 || len > 32) return ESP_ERR_INVALID_ARG;
+    /* INIT_DATA is a FIFO; do not overwrite adjacent simulated registers. */
+    for (size_t i = 0; i < len; ++i) {
+        esp_err_t err = register_bus_write_u8(port, addr, reg == 0x5e ? reg : (uint8_t)(reg + i), data[i]);
+        if (err != ESP_OK) return err;
+    }
+    return ESP_OK;
 }
 
 esp_err_t register_bus_write_u8(i2c_port_t port, uint8_t dev_addr, uint8_t reg, uint8_t value)

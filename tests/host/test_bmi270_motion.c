@@ -1,4 +1,5 @@
 #include "bmi270.h"
+#include "bmi270_config.h"
 #include "board_sticks3.h"
 #include "fake_register_bus.h"
 
@@ -49,6 +50,7 @@ static void test_chip_id_match_initializes(void)
 {
     fake_register_bus_reset();
     fake_register_bus_set_reg(BOARD_BMI270_ADDR, 0x00, 0x24);
+    fake_register_bus_set_reg(BOARD_BMI270_ADDR, 0x21, 1);
     assert(bmi270_init(BOARD_I2C_PORT, BOARD_BMI270_ADDR) == ESP_OK);
     assert(fake_register_bus_has_write(BOARD_BMI270_ADDR, 0x7c, 0x02));
     assert(fake_register_bus_has_write(BOARD_BMI270_ADDR, 0x40, 0xa8));
@@ -97,8 +99,41 @@ static void test_motion_threshold_and_hysteresis(void)
     assert(!motion);
 }
 
+static void test_configuration_upload_and_init_failure(void)
+{
+    fake_register_bus_reset(); fake_register_bus_set_reg(BOARD_BMI270_ADDR, 0x00, 0x24);
+    /* Chip ID alone must never establish sensor readiness. */
+    assert(bmi270_init(BOARD_I2C_PORT, BOARD_BMI270_ADDR) == ESP_ERR_INVALID_RESPONSE);
+    assert(!fake_register_bus_has_write(BOARD_BMI270_ADDR, 0x7d, 4));
+    fake_register_bus_reset(); fake_register_bus_set_reg(BOARD_BMI270_ADDR, 0x00, 0x24);
+    fake_register_bus_set_reg(BOARD_BMI270_ADDR, 0x21, 1);
+    fake_register_bus_fail_next_write(ESP_FAIL);
+    assert(bmi270_init(BOARD_I2C_PORT, BOARD_BMI270_ADDR) == ESP_FAIL);
+    fake_register_bus_reset(); fake_register_bus_set_reg(BOARD_BMI270_ADDR, 0x00, 0x24);
+    fake_register_bus_set_reg(BOARD_BMI270_ADDR, 0x21, 1);
+    assert(bmi270_init(BOARD_I2C_PORT, BOARD_BMI270_ADDR) == ESP_OK);
+    size_t uploaded = 0, chunks = 0;
+    for (size_t i = 0; i < fake_register_bus_op_count(); ++i) {
+        const fake_bus_op_t *op = fake_register_bus_op(i);
+        if (op->type != FAKE_BUS_OP_WRITE) continue;
+        if (op->reg == 0x5b) {
+            assert(op->value == ((chunks * 16) & 0x0f));
+            const fake_bus_op_t *next = fake_register_bus_op(i + 1);
+            assert(next->reg == 0x5c && next->value == chunks); ++chunks;
+        }
+        if (op->reg == 0x5e) {
+            assert(uploaded < sizeof(bmi270_config_file));
+            assert(op->value == bmi270_config_file[uploaded++]);
+        }
+    }
+    assert(uploaded == 8192 && chunks == 256);
+    assert(fake_register_bus_has_write(BOARD_BMI270_ADDR, 0x59, 0));
+    assert(fake_register_bus_has_write(BOARD_BMI270_ADDR, 0x59, 1));
+}
+
 int main(void)
 {
+    test_configuration_upload_and_init_failure();
     test_null_pointer_validation();
     test_chip_id_mismatch_fails_init();
     test_chip_id_match_initializes();

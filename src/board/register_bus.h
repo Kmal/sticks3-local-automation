@@ -9,6 +9,7 @@
 extern "C" {
 #endif
 
+esp_err_t register_bus_write(i2c_port_t port, uint8_t dev_addr, uint8_t reg, const uint8_t *data, size_t len);
 esp_err_t register_bus_probe(i2c_port_t port, uint8_t dev_addr);
 esp_err_t register_bus_write_u8(i2c_port_t port, uint8_t dev_addr, uint8_t reg, uint8_t value);
 esp_err_t register_bus_read_u8(i2c_port_t port, uint8_t dev_addr, uint8_t reg, uint8_t *value);

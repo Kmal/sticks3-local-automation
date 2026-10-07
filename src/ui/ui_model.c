@@ -15,6 +15,17 @@
 #define CONFIG_APP_BLE_GATT_DEVICE_NAME "M5StickS3-Control"
 #endif
 
+static ui_config_lock_cb_t s_config_lock;
+static ui_config_unlock_cb_t s_config_unlock;
+static ui_config_commit_cb_t s_config_commit;
+static void *s_config_ctx;
+
+void ui_runtime_set_config_transaction(ui_config_lock_cb_t lock, ui_config_unlock_cb_t unlock,
+                                       ui_config_commit_cb_t commit, void *ctx)
+{
+    s_config_lock = lock; s_config_unlock = unlock; s_config_commit = commit; s_config_ctx = ctx;
+}
+
 static void ui_copy_text(char *dest, size_t dest_size, const char *text)
 {
     if (dest == NULL || dest_size == 0u) return;
@@ -211,7 +222,7 @@ bool ui_runtime_load_automation(ui_runtime_t *ui, uint8_t automation_index)
     return false;
 }
 
-bool ui_runtime_save_automation(ui_runtime_t *ui, uint8_t automation_index, ui_automation_edit_t edit)
+static bool ui_runtime_save_automation_unlocked(ui_runtime_t *ui, uint8_t automation_index, ui_automation_edit_t edit)
 {
     if (ui == NULL || automation_index >= UI_AUTOMATION_VISIBLE_COUNT ||
         edit < UI_AUTOMATION_EDIT_ENABLED || edit > UI_AUTOMATION_EDIT_ACTION) return false;
@@ -253,7 +264,8 @@ bool ui_runtime_save_automation(ui_runtime_t *ui, uint8_t automation_index, ui_a
         rule->cooldown_ms = 1000u;
     }
     char error[RULE_ERROR_MAX] = {0};
-    bool ok = automation_config_validate(config, error, sizeof(error)) && rule_config_store_save(&store, config);
+    bool ok = automation_config_validate(config, error, sizeof(error)) &&
+        (s_config_commit != NULL ? s_config_commit(config, &store, s_config_ctx) : rule_config_store_save(&store, config));
     rule_config_store_close(&store);
     if (ok) {
         slot->enabled = rule->enabled;
@@ -268,5 +280,14 @@ bool ui_runtime_save_automation(ui_runtime_t *ui, uint8_t automation_index, ui_a
     } else {
         slot->last_error[0] = '\0';
     }
+    return ok;
+}
+
+bool ui_runtime_save_automation(ui_runtime_t *ui, uint8_t index, ui_automation_edit_t edit)
+{
+    if ((s_config_lock == NULL) != (s_config_unlock == NULL)) return false;
+    if (s_config_lock != NULL && !s_config_lock(s_config_ctx)) return false;
+    const bool ok = ui_runtime_save_automation_unlocked(ui, index, edit);
+    if (s_config_unlock != NULL) s_config_unlock(s_config_ctx);
     return ok;
 }

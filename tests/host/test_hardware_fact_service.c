@@ -59,6 +59,7 @@ static void prepare_hardware_registers(uint16_t vbat_mv, uint16_t vin_mv, uint16
 {
     fake_register_bus_reset();
     fake_register_bus_set_reg(BOARD_BMI270_ADDR, 0x00, 0x24);
+    fake_register_bus_set_reg(BOARD_BMI270_ADDR, 0x21, 1);
     set_accel_raw(0, 0, 0);
     set_reg16(BOARD_M5PM1_ADDR, M5PM1_REG_VBAT_L, vbat_mv);
     set_reg16(BOARD_M5PM1_ADDR, M5PM1_REG_VIN_L, vin_mv);
