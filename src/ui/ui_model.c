@@ -15,6 +15,33 @@
 #define CONFIG_APP_BLE_GATT_DEVICE_NAME "M5StickS3-Control"
 #endif
 
+static ui_automation_load_cb_t s_automation_load;
+static ui_automation_save_cb_t s_automation_save;
+static void *s_automation_ctx;
+
+void ui_model_set_automation_backend(ui_automation_load_cb_t load, ui_automation_save_cb_t save, void *ctx)
+{
+    s_automation_load = load;
+    s_automation_save = save;
+    s_automation_ctx = ctx;
+}
+
+/* Host-only storage fallback supports standalone model tests. Firmware must
+ * use the application transaction, including when runtime startup failed. */
+static bool ui_load_config(automation_config_t *config)
+{
+    if (s_automation_load != NULL) return s_automation_load(config, s_automation_ctx);
+#ifdef ESP_PLATFORM
+    return false;
+#else
+    rule_config_store_t store = {0};
+    if (!rule_config_store_open(&store)) return false;
+    bool ok = rule_config_store_load(&store, config);
+    rule_config_store_close(&store);
+    return ok;
+#endif
+}
+
 static void ui_copy_text(char *dest, size_t dest_size, const char *text)
 {
     if (dest == NULL || dest_size == 0u) return;
@@ -185,16 +212,7 @@ bool ui_runtime_load_automation(ui_runtime_t *ui, uint8_t automation_index)
     if (ui == NULL || automation_index >= UI_AUTOMATION_VISIBLE_COUNT) return false;
     automation_config_t *config = malloc(sizeof(*config));
     if (config == NULL) return false;
-    automation_config_set_defaults(config);
-    rule_config_store_t store = {0};
-    if (rule_config_store_open(&store)) {
-        if (!rule_config_store_load(&store, config)) {
-            rule_config_store_close(&store);
-            free(config);
-            return false;
-        }
-        rule_config_store_close(&store);
-    }
+    if (!ui_load_config(config)) { free(config); return false; }
     ui_automation_state_t *slot = &ui->automations[automation_index];
     slot->rule_index = automation_index;
     if (automation_index < RULE_MAX_RULES) {
@@ -211,21 +229,11 @@ bool ui_runtime_load_automation(ui_runtime_t *ui, uint8_t automation_index)
     return false;
 }
 
-bool ui_runtime_save_automation(ui_runtime_t *ui, uint8_t automation_index, ui_automation_edit_t edit)
+bool ui_automation_apply_edit(automation_config_t *config, uint8_t automation_index,
+                              const ui_automation_state_t *slot, ui_automation_edit_t edit)
 {
-    if (ui == NULL || automation_index >= UI_AUTOMATION_VISIBLE_COUNT ||
+    if (config == NULL || slot == NULL || automation_index >= UI_AUTOMATION_VISIBLE_COUNT ||
         edit < UI_AUTOMATION_EDIT_ENABLED || edit > UI_AUTOMATION_EDIT_ACTION) return false;
-    automation_config_t *config = malloc(sizeof(*config));
-    if (config == NULL) return false;
-    automation_config_set_defaults(config);
-    rule_config_store_t store = {0};
-    if (!rule_config_store_open(&store)) { free(config); return false; }
-    if (!rule_config_store_load(&store, config)) {
-        rule_config_store_close(&store);
-        free(config);
-        return false;
-    }
-    ui_automation_state_t *slot = &ui->automations[automation_index];
     if (config->rule_count <= automation_index) {
         for (size_t i = config->rule_count; i <= automation_index; ++i) {
             automation_rule_t *added = &config->rules[i];
@@ -252,10 +260,31 @@ bool ui_runtime_save_automation(ui_runtime_t *ui, uint8_t automation_index, ui_a
     if (rule->cooldown_ms < RULE_MIN_COOLDOWN_MS || rule->cooldown_ms > RULE_MAX_COOLDOWN_MS) {
         rule->cooldown_ms = 1000u;
     }
-    char error[RULE_ERROR_MAX] = {0};
-    bool ok = automation_config_validate(config, error, sizeof(error)) && rule_config_store_save(&store, config);
-    rule_config_store_close(&store);
+    return automation_config_validate(config, NULL, 0);
+}
+
+bool ui_runtime_save_automation(ui_runtime_t *ui, uint8_t automation_index, ui_automation_edit_t edit)
+{
+    if (ui == NULL || automation_index >= UI_AUTOMATION_VISIBLE_COUNT ||
+        edit < UI_AUTOMATION_EDIT_ENABLED || edit > UI_AUTOMATION_EDIT_ACTION) return false;
+    automation_config_t *config = malloc(sizeof(*config));
+    if (config == NULL) return false;
+    ui_automation_state_t *slot = &ui->automations[automation_index];
+    bool ok = false;
+    if (s_automation_save != NULL) {
+        ok = s_automation_save(config, automation_index, slot, edit, s_automation_ctx);
+    }
+#ifndef ESP_PLATFORM
+    else if (ui_load_config(config) && ui_automation_apply_edit(config, automation_index, slot, edit)) {
+        rule_config_store_t store = {0};
+        if (rule_config_store_open(&store)) {
+            ok = rule_config_store_save(&store, config);
+            rule_config_store_close(&store);
+        }
+    }
+#endif
     if (ok) {
+        const automation_rule_t *rule = &config->rules[automation_index];
         slot->enabled = rule->enabled;
         slot->trigger_source = rule->when.source;
         slot->action_kind = rule->actions[0].type;
@@ -263,10 +292,6 @@ bool ui_runtime_save_automation(ui_runtime_t *ui, uint8_t automation_index, ui_a
     free(config);
     automation_label(slot);
     slot->loaded = ok;
-    if (!ok) {
-        ui_copy_text(slot->last_error, sizeof(slot->last_error), error[0] ? error : "Automation save failed");
-    } else {
-        slot->last_error[0] = '\0';
-    }
+    ui_copy_text(slot->last_error, sizeof(slot->last_error), ok ? "" : "Automation save failed");
     return ok;
 }

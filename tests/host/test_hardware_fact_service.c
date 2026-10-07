@@ -117,10 +117,14 @@ static void test_usb_change_and_poll_interval(void)
     const size_t first_count = s_fact_count;
     assert(hardware_fact_service_poll(&service, 150) == 0);
     assert(s_fact_count == first_count);
+    reset_collector();
+    assert(hardware_fact_service_poll(&service, 200) > 0);
+    assert(has_bool_fact(RULE_SOURCE_POWER_USB_PRESENT, true));
+    assert(has_bool_fact(RULE_SOURCE_BMI270_MOTION, false));
 
     set_reg16(BOARD_M5PM1_ADDR, M5PM1_REG_VIN_L, 0);
     set_reg16(BOARD_M5PM1_ADDR, M5PM1_REG_5VINOUT_L, 0);
-    assert(hardware_fact_service_poll(&service, 250) > 0);
+    assert(hardware_fact_service_poll(&service, 300) > 0);
     assert(has_bool_fact(RULE_SOURCE_POWER_USB_PRESENT, false));
 }
 

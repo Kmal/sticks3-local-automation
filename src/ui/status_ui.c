@@ -512,23 +512,13 @@ static bool status_ui_action_ble_show_status(ui_runtime_t *ui, const ui_menu_ite
     return true;
 }
 
-static void status_ui_notify_automation_config_changed(void)
-{
-    if (s_handlers.automation_config_changed != NULL) {
-        s_handlers.automation_config_changed(s_handlers.ctx);
-    }
-}
-
 static bool status_ui_action_automation_toggle_enable(ui_runtime_t *ui, const ui_menu_item_t *item)
 {
     uint8_t index = item->automation_index;
-    (void)ui_runtime_load_automation(ui, index);
+    if (!ui_runtime_load_automation(ui, index)) return false;
     ui->automations[index].enabled = !ui->automations[index].enabled;
     bool ok = ui_runtime_save_automation(ui, index, UI_AUTOMATION_EDIT_ENABLED);
-    if (ok) {
-        status_ui_notify_automation_config_changed();
-    }
-    ui_runtime_set_toast(ui, ok ? UI_TOAST_SUCCESS : UI_TOAST_ERROR, ui->automations[index].enabled ? "Automation enabled" : "Automation disabled", 2000u);
+    ui_runtime_set_toast(ui, ok ? UI_TOAST_SUCCESS : UI_TOAST_ERROR, ok ? (ui->automations[index].enabled ? "Automation enabled" : "Automation disabled") : ui->automations[index].last_error, 2000u);
     return ok;
 }
 
@@ -538,13 +528,12 @@ static const rule_action_kind_t s_action_preset_kinds[] = { RULE_ACTION_BLE_MESS
 static bool status_ui_action_automation_edit_trigger(ui_runtime_t *ui, const ui_menu_item_t *item)
 {
     uint8_t index = item->automation_index;
-    (void)ui_runtime_load_automation(ui, index);
+    if (!ui_runtime_load_automation(ui, index)) return false;
     ui_automation_state_t *slot = &ui->automations[index];
     size_t selected = item->flags < (sizeof(s_trigger_preset_sources) / sizeof(s_trigger_preset_sources[0])) ? item->flags : 0u;
     slot->trigger_source = s_trigger_preset_sources[selected];
     bool ok = ui_runtime_save_automation(ui, index, UI_AUTOMATION_EDIT_TRIGGER);
     if (ok) {
-        status_ui_notify_automation_config_changed();
         (void)ui_nav_back(&ui->nav);
     }
     ui_runtime_set_toast(ui, ok ? UI_TOAST_SUCCESS : UI_TOAST_ERROR, ok ? slot->trigger_label : slot->last_error, 1800u);
@@ -554,13 +543,12 @@ static bool status_ui_action_automation_edit_trigger(ui_runtime_t *ui, const ui_
 static bool status_ui_action_automation_edit_action(ui_runtime_t *ui, const ui_menu_item_t *item)
 {
     uint8_t index = item->automation_index;
-    (void)ui_runtime_load_automation(ui, index);
+    if (!ui_runtime_load_automation(ui, index)) return false;
     ui_automation_state_t *slot = &ui->automations[index];
     size_t selected = item->flags < (sizeof(s_action_preset_kinds) / sizeof(s_action_preset_kinds[0])) ? item->flags : 0u;
     slot->action_kind = s_action_preset_kinds[selected];
     bool ok = ui_runtime_save_automation(ui, index, UI_AUTOMATION_EDIT_ACTION);
     if (ok) {
-        status_ui_notify_automation_config_changed();
         (void)ui_nav_back(&ui->nav);
     }
     ui_runtime_set_toast(ui, ok ? UI_TOAST_SUCCESS : UI_TOAST_ERROR, ok ? slot->action_label : slot->last_error, 1800u);

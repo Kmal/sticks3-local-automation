@@ -2,6 +2,41 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include "sdkconfig.h"
+
+#ifndef CONFIG_APP_SOUND_LEVEL_WINDOW_MS
+#define CONFIG_APP_SOUND_LEVEL_WINDOW_MS 100
+#endif
+#ifndef CONFIG_APP_HARDWARE_FACT_POLL_INTERVAL_MS
+#define CONFIG_APP_HARDWARE_FACT_POLL_INTERVAL_MS 1000
+#endif
+
+/* Sampled observations expire after three producer intervals. State/edge
+ * sources retain their existing transition semantics. Sustain on samples is
+ * evaluated only by a new measurement, never by elapsed time alone. */
+static uint32_t sample_max_gap_ms(rule_source_t source)
+{
+    if (rule_source_is_sound(source)) return 3u * CONFIG_APP_SOUND_LEVEL_WINDOW_MS;
+    if (source == RULE_SOURCE_BATTERY_PERCENT || source == RULE_SOURCE_POWER_USB_PRESENT ||
+        source == RULE_SOURCE_BMI270_MOTION || source == RULE_SOURCE_ADC_VOLTAGE_MV)
+        return 3u * CONFIG_APP_HARDWARE_FACT_POLL_INTERVAL_MS;
+    return 0;
+}
+
+static void invalidate_condition(rule_engine_t *engine, size_t i)
+{
+    engine->state[i].condition_true = false;
+    engine->state[i].fired_while_true = false;
+    engine->state[i].pending_pulse = false;
+    engine->state[i].has_last_fact = false;
+}
+
+void rule_engine_invalidate_source(rule_engine_t *engine, rule_source_t source)
+{
+    if (engine == NULL) return;
+    for (size_t i = 0; i < engine->config.rule_count; ++i)
+        if (engine->config.rules[i].when.source == source) invalidate_condition(engine, i);
+}
 
 static bool source_key_matches(const char *rule_key, const char *fact_key)
 {
@@ -118,7 +153,10 @@ static size_t evaluate_rule(rule_engine_t *engine, size_t i, uint32_t now,
         event->fire_count = engine->state[i].fire_count + 1;
         (void)strncpy(event->rule_name, rule->name, sizeof(event->rule_name) - 1);
     }
-    if (!sink(&batch, ctx)) return 0;
+    if (!sink(&batch, ctx)) {
+        if (pulse) invalidate_condition(engine, i);
+        return 0;
+    }
     engine->next_event_sequence += (uint32_t)rule->action_count;
     engine->state[i].fired_while_true = !pulse;
     engine->state[i].condition_true = !pulse;
@@ -137,6 +175,12 @@ size_t rule_engine_process_fact_to_sink(rule_engine_t *engine, const trigger_fac
     for (size_t i = 0; i < engine->config.rule_count; ++i) {
         const automation_rule_t *rule = &engine->config.rules[i];
         if (!rule->enabled || rule->when.source != fact->source || !source_key_matches(rule->when.source_key, fact->source_key)) continue;
+        const uint32_t max_gap = sample_max_gap_ms(fact->source);
+        if (max_gap != 0 && engine->state[i].has_last_fact &&
+            (uint32_t)(fact->uptime_ms - engine->state[i].last_fact_ms) > max_gap)
+            invalidate_condition(engine, i);
+        engine->state[i].last_fact_ms = fact->uptime_ms;
+        engine->state[i].has_last_fact = true;
         const bool pulse = source_is_pulse(fact->source);
         const bool now_true = values_compare(fact->value, rule->when.comparator, rule->when.threshold);
         if (!now_true) {
@@ -164,7 +208,16 @@ size_t rule_engine_tick_to_sink(rule_engine_t *engine, uint32_t uptime_ms, rule_
 {
     if (engine == NULL || sink == NULL) return 0;
     size_t count = 0;
-    for (size_t i = 0; i < engine->config.rule_count; ++i) count += evaluate_rule(engine, i, uptime_ms, sink, ctx);
+    for (size_t i = 0; i < engine->config.rule_count; ++i) {
+        const uint32_t max_gap = sample_max_gap_ms(engine->config.rules[i].when.source);
+        if (max_gap != 0) {
+            if (engine->state[i].has_last_fact &&
+                (uint32_t)(uptime_ms - engine->state[i].last_fact_ms) > max_gap)
+                invalidate_condition(engine, i);
+            continue;
+        }
+        count += evaluate_rule(engine, i, uptime_ms, sink, ctx);
+    }
     return count;
 }
 

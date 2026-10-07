@@ -162,10 +162,8 @@ size_t hardware_fact_service_poll(hardware_fact_service_t *service,
             }
             if (service->config.enable_usb_power) {
                 if (status.usb_valid) {
-                    if (!service->last_usb_valid || service->last_usb_present != status.usb_present) {
-                        if (emit_bool_fact(service->adapter, RULE_SOURCE_POWER_USB_PRESENT, "", status.usb_present, uptime_ms)) {
-                            ++emitted;
-                        }
+                    if (emit_bool_fact(service->adapter, RULE_SOURCE_POWER_USB_PRESENT, "", status.usb_present, uptime_ms)) {
+                        ++emitted;
                     }
                     service->last_usb_valid = true;
                     service->last_usb_present = status.usb_present;
@@ -178,10 +176,8 @@ size_t hardware_fact_service_poll(hardware_fact_service_t *service,
     if (service->config.enable_bmi270) {
         bool motion = false;
         if (bmi270_motion_poll(&service->motion_state, BOARD_I2C_PORT, BOARD_BMI270_ADDR, uptime_ms, &motion) == ESP_OK) {
-            if (motion || (service->last_motion_valid && service->last_motion && !motion)) {
-                if (emit_bool_fact(service->adapter, RULE_SOURCE_BMI270_MOTION, "", motion, uptime_ms)) {
-                    ++emitted;
-                }
+            if (emit_bool_fact(service->adapter, RULE_SOURCE_BMI270_MOTION, "", motion, uptime_ms)) {
+                ++emitted;
             }
             service->last_motion = motion;
             service->last_motion_valid = true;

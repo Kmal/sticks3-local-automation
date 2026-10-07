@@ -21,7 +21,9 @@ const board_audio_clock_profile_t *board_audio_clock_get_profile(void)
     static const board_audio_clock_profile_t profile = {
         .sample_rate_hz = 16000,
         .mclk_hz = 12288000,
-        .bclk_hz = 512000,
+        .bclk_hz = 1024000,
+        .slot_bits = 32,
+        .frame_slots = 2,
         .lrck_hz = 16000,
         .bits_per_sample = 16,
         .channels = 1,
@@ -85,6 +87,9 @@ static void test_capture_only_pin_config(void)
     ASSERT_EQ(16, s_last_rx_cfg.gpio_cfg.din);
     ASSERT_EQ(I2S_GPIO_UNUSED, s_last_rx_cfg.gpio_cfg.dout);
     ASSERT_EQ(I2S_SLOT_BIT_WIDTH_32BIT, s_last_rx_cfg.slot_cfg.slot_bit_width);
+    const board_audio_clock_profile_t *clock = board_audio_clock_get_profile();
+    ASSERT_EQ(clock->bclk_hz, s_last_rx_cfg.clk_cfg.sample_rate_hz * 2 * s_last_rx_cfg.slot_cfg.slot_bit_width);
+    ASSERT_EQ(clock->mclk_hz, s_last_rx_cfg.clk_cfg.sample_rate_hz * s_last_rx_cfg.clk_cfg.mclk_multiple);
 }
 
 static void test_playback_only_pin_config(void)

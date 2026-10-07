@@ -45,7 +45,7 @@ This directory records the StickS3 hardware facts that the firmware is allowed t
 | --- | ---: | --- | --- | --- |
 | SoC/module | ESP32-S3-PICO-1-N8R8 | N/A | N/A | ESP32-S3 does not support Bluetooth Classic / BR/EDR. |
 | I2S MCLK | GPIO18 | ESP32-S3 -> ES8311 | `BOARD_I2S_MCLK_IO` | Current profile uses fixed MCLK at 12.288 MHz. |
-| I2S BCLK | GPIO17 | ESP32-S3 -> ES8311 | `BOARD_I2S_BCK_IO` | Current documented target is 512 kHz for 16 kHz, 16-bit mono capture. |
+| I2S BCLK | GPIO17 | ESP32-S3 -> ES8311 | `BOARD_I2S_BCK_IO` | Current documented target is 1.024 MHz for 16 kHz, 16-bit mono payload in two 32-bit standard I2S slots. |
 | I2S LRCLK/WS | GPIO15 | ESP32-S3 -> ES8311 | `BOARD_I2S_WS_IO` | Current profile uses 16 kHz LRCK. |
 | I2S TX / speaker DAC data (`G14_I2S_DDAC`) | GPIO14 | ESP32-S3 -> ES8311 | `BOARD_I2S_DO_IO` | Codec DAC/input data pin used by the speaker path. |
 | I2S RX / microphone ADC data (`G16_I2S_DADC`) | GPIO16 | ES8311 -> ESP32-S3 | `BOARD_I2S_DI_IO` | Microphone/ADC samples read by the ESP32-S3. |

@@ -28,11 +28,13 @@ typedef struct {
         uint32_t fire_count;
         rule_value_t last_value;
         bool pending_pulse;
+        bool has_last_fact;
+        uint32_t last_fact_ms;
     } state[RULE_MAX_RULES];
     uint32_t next_event_sequence;
 } rule_engine_t;
 
-/* Accept all actions of one rule together. False leaves it pending for retry. */
+/* Admit all actions together. Rejected pulses are discarded; levels can retry. */
 typedef struct {
     size_t event_count;
     rule_event_t events[RULE_MAX_ACTIONS_PER_RULE];
@@ -48,5 +50,6 @@ size_t rule_engine_process_fact_to_sink(rule_engine_t *engine, const trigger_fac
 size_t rule_engine_tick_to_sink(rule_engine_t *engine, uint32_t uptime_ms,
                               rule_event_batch_sink_t sink, void *ctx);
 const automation_rule_t *rule_engine_get_rule_by_id(const rule_engine_t *engine, uint32_t rule_id);
+void rule_engine_invalidate_source(rule_engine_t *engine, rule_source_t source);
 
 size_t rule_engine_process_fact_with_sink(rule_engine_t *engine, const trigger_fact_t *fact, rule_event_batch_sink_t sink, void *ctx);

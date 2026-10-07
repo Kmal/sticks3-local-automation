@@ -22,7 +22,6 @@ typedef enum {
 typedef struct {
     void (*key1_pressed)(void *ctx);
     void (*key2_pressed)(void *ctx);
-    void (*automation_config_changed)(void *ctx);
     /* Called when the Web UI service flag changes so the owner can start or
      * stop heavyweight server resources outside the status UI module. */
     void (*service_enabled_changed)(bool enabled, void *ctx);

@@ -15,6 +15,8 @@ typedef struct {
     int lrck_hz;
     int bits_per_sample;
     int channels;
+    int slot_bits;
+    int frame_slots;
     bool fixed_mclk_authoritative;
     int mclk_multiple_for_driver;
     uint8_t es8311_clk_reg_value;

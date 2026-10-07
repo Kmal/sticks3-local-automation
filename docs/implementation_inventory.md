@@ -20,7 +20,7 @@ This inventory is generated from direct source inspection of `src/**/*.c`, `src/
 | `board_adc.c` | default | yes | ESP-IDF ADC1 oneshot allowlist for safe Grove/Hat voltage rule facts with calibrated millivolt conversion and fail-closed behavior when calibration is unavailable. |
 | `board_power.c` | default | yes | Board-level M5PM1 power policy, battery percent interpolation, USB/external-power-present thresholding, independent degraded VBAT/VIN/5V voltage reads with explicit USB-valid status, and status UI battery helper. |
 | `board_audio.c` | default via sound/speaker config | yes | Capture-only and playback-only audio initializer linked by sound-level trigger or speaker-action builds; `app_main()` uses capture-only for sound rules and `action_speaker.c` uses playback-only for tones. |
-| `board_audio_clock.c` | default via sound/speaker config | yes | 16 kHz/12.288 MHz/512 kHz audio clock profile helper linked by sound-level trigger or speaker-action builds. |
+| `board_audio_clock.c` | default via sound/speaker config | yes | 16 kHz/12.288 MHz/1.024 MHz audio clock profile helper linked by sound-level trigger or speaker-action builds. |
 | `board_audio_power.c` | default via sound/speaker config | yes | M5PM1 L3B audio rail enable wrapper and PYG3 speaker-amplifier control linked by audio trigger or speaker-action builds while preserving LCD M5PM1 behavior. |
 | `board_i2c.c` | default | no | ESP-IDF shared I2C bus initializer used by LCD/status UI paths and available to board helpers. |
 | `board_i2s.c` | default via sound/speaker config | yes | Capture-only/playback-only I2S driver source linked by sound-level trigger or speaker-action builds; includes 32-bit-slot mono `int16_t` decode helper and pin-configuration coverage. |
@@ -53,7 +53,7 @@ This inventory is generated from direct source inspection of `src/**/*.c`, `src/
 | `uac_speaker_sink.c` | conditional | yes | USB speaker PCM sink linked only by explicit UAC builds; reuses the existing playback-only ES8311/I2S path, requires audio power, and clamps volume below 75%. |
 | `uac_service.c` | conditional | yes | Opt-in USB Audio Class service linked only by `CONFIG_APP_USB_UAC_DEVICE`; resolves Kconfig, allocates direction ring buffers, starts the selected board-audio owner, creates gated bridge tasks before registering Espressif UAC callbacks; enabled-path tests exercise task failures and retained callbacks after USB initialization failure. |
 | `ui_keyboard.c` | default | yes | 9-key overlay input model for SSID/password/AP/time fields, including explicit cancel result support and menu-edit cancel metadata coverage. |
-| `ui_model.c` | default | yes | Menu/application model for Wi-Fi, AP, Bluetooth, automation editing, Web UI service state, and time settings. |
+| `ui_model.c` | default | yes | Menu/application model for Wi-Fi, AP, Bluetooth, field-specific automation edits through the application-owned transaction backend, Web UI service state, and time settings. |
 | `ui_nav.c` | default | yes | Menu graph/navigation state machine for the status UI. |
 | `ui_render.c` | default | no | LCD rendering of status bar, menus, Wi-Fi/AP/BLE/automation/settings screens, toasts, and keyboard overlay. |
 
@@ -84,3 +84,5 @@ idf.py -B build-uac-mic -D SDKCONFIG="$PWD/build-uac-mic/sdkconfig" \
 ```
 
 Use `speaker` in both profile paths for the speaker-only build. Compilation and host tests are software evidence. Physical qualification remains governed by `docs/hardware_qualification.md`.
+
+The 2026-10-07 follow-up adds production LCD transaction callback coverage (including lock/commit failure and immediate Web edits), discarded rejected pulses, freshness-gated sampled sustain, periodic USB/motion observations, and source-derived two-slot I2S clock expectations.

@@ -1142,7 +1142,7 @@ static bool rule_web_handle_request_unlocked(rule_web_t *web, rule_web_method_t 
         }
         rule_event_t event;
         memset(&event, 0, sizeof(event));
-        event.sequence = web->runtime->engine.next_event_sequence++;
+        event.sequence = web->runtime->engine.next_event_sequence;
         event.rule_id = rule->id;
         event.source = rule->when.source;
         event.action = rule->actions[0].type;
@@ -1150,7 +1150,11 @@ static bool rule_web_handle_request_unlocked(rule_web_t *web, rule_web_method_t 
         event.measured_value = rule->when.threshold;
         (void)snprintf(event.rule_name, sizeof(event.rule_name), "%s", rule->name);
         bool queued = action_enqueue(&web->runtime->dispatcher, &event);
-        const int written = snprintf(out, out_len, "{\"ok\":%s,\"queued\":%s}", queued ? "true" : "false", queued ? "true" : "false");
+        if (queued) web->runtime->engine.next_event_sequence++;
+        /* Compatibility route: this executes one action, not rule evaluation. */
+        const int written = snprintf(out, out_len,
+            "{\"ok\":%s,\"queued\":%s,\"mode\":\"first_action\",\"evaluates_rule\":false}",
+            queued ? "true" : "false", queued ? "true" : "false");
         return written > 0 && (size_t)written < out_len;
     }
     if (method == RULE_WEB_METHOD_POST && strcmp(path, "/api/gpio/test") == 0) {
