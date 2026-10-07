@@ -81,6 +81,8 @@ compile test_capability_hardware_disabled -DCONFIG_APP_BATTERY_FACTS=0 -DCONFIG_
   "${ROOT}/src/rules/rule_types.c" "${ROOT}/src/rules/capability_registry.c" "${ROOT}/tests/host/test_capability_hardware.c"
 compile test_capability_sound_disabled -DCONFIG_APP_SOUND_LEVEL_TRIGGERS=0 -I"${FAKE_INC}" -I"${ROOT}/src/app" -I"${ROOT}/src/audio" -I"${ROOT}/src/board" -I"${ROOT}/src/rules" -I"${ROOT}/src/actions" -I"${ROOT}/src/triggers" -I"${ROOT}/src/transport" -I"${ROOT}/src/ui" \
   "${ROOT}/src/rules/rule_types.c" "${ROOT}/src/rules/capability_registry.c" "${ROOT}/tests/host/test_capability_sound_disabled.c"
+compile test_capability_omitted -I"${ROOT}/tests/host/fakes/disabled_sdkconfig" -I"${FAKE_INC}" -I"${ROOT}/src/board" -I"${ROOT}/src/rules" \
+  "${ROOT}/src/rules/rule_types.c" "${ROOT}/src/rules/capability_registry.c" "${ROOT}/tests/host/test_capability_omitted.c"
 compile test_rule_engine -I"${FAKE_INC}" -I"${ROOT}/src/app" -I"${ROOT}/src/audio" -I"${ROOT}/src/board" -I"${ROOT}/src/rules" -I"${ROOT}/src/actions" -I"${ROOT}/src/triggers" -I"${ROOT}/src/transport" -I"${ROOT}/src/ui" \
   "${ROOT}/src/rules/rule_types.c" "${ROOT}/src/rules/capability_registry.c" "${ROOT}/src/rules/rule_engine.c" "${ROOT}/tests/host/test_rule_engine.c"
 compile test_trigger_sources -I"${ROOT}/src/app" -I"${ROOT}/src/audio" -I"${ROOT}/src/board" -I"${ROOT}/src/rules" -I"${ROOT}/src/actions" -I"${ROOT}/src/triggers" -I"${ROOT}/src/transport" -I"${ROOT}/src/ui" \
@@ -93,10 +95,10 @@ compile test_rule_config_store -I"${FAKE_INC}" -I"${ROOT}/src/app" -I"${ROOT}/sr
   "${ROOT}/src/rules/rule_types.c" "${ROOT}/src/rules/capability_registry.c" "${ROOT}/src/rules/rule_config_store.c" "${ROOT}/tests/host/test_rule_config_store.c"
 compile test_action_modules -I"${FAKE_INC}" -I"${ROOT}/src/app" -I"${ROOT}/src/audio" -I"${ROOT}/src/board" -I"${ROOT}/src/rules" -I"${ROOT}/src/actions" -I"${ROOT}/src/triggers" -I"${ROOT}/src/transport" -I"${ROOT}/src/ui" \
   "${ROOT}/src/rules/rule_types.c" "${ROOT}/src/rules/capability_registry.c" "${ROOT}/src/actions/action_http.c" "${ROOT}/src/actions/action_ir.c" "${ROOT}/src/actions/action_speaker.c" "${ROOT}/src/actions/action_hat.c" "${ROOT}/tests/host/test_action_modules.c"
-compile test_external_triggers_and_web -I"${FAKE_INC}" -I"${ROOT}/generated" -I"${ROOT}/src/app" -I"${ROOT}/src/audio" -I"${ROOT}/src/board" -I"${ROOT}/src/rules" -I"${ROOT}/src/actions" -I"${ROOT}/src/triggers" -I"${ROOT}/src/transport" -I"${ROOT}/src/ui" \
-  "${ROOT}/src/rules/rule_types.c" "${ROOT}/src/rules/capability_registry.c" "${ROOT}/src/rules/rule_engine.c" "${ROOT}/src/triggers/trigger_sources.c" "${ROOT}/src/actions/action_dispatcher.c" "${ROOT}/src/board/m5pm1.c" "${ROOT}/src/board/board_power.c" "${ROOT}/src/board/bmi270.c" "${ROOT}/src/board/board_adc.c" "${ROOT}/src/board/hardware_fact_service.c" "${ROOT}/tests/host/fakes/fake_register_bus.c" "${ROOT}/src/rules/rule_runtime.c" "${ROOT}/src/rules/rule_config_store.c" "${ROOT}/src/actions/action_http.c" "${ROOT}/src/app/app_wifi.c" "${ROOT}/src/app/app_time.c" "${ROOT}/src/rules/rule_web.c" "${ROOT}/generated/webui_assets.c" "${ROOT}/src/triggers/trigger_gpio.c" "${ROOT}/src/triggers/trigger_hat.c" "${ROOT}/tests/host/test_external_triggers_and_web.c"
+compile test_external_triggers_and_web -DCJSON_NESTING_LIMIT=16 -I"${ROOT}/vendor/cjson" -I"${FAKE_INC}" -I"${ROOT}/generated" -I"${ROOT}/src/app" -I"${ROOT}/src/audio" -I"${ROOT}/src/board" -I"${ROOT}/src/rules" -I"${ROOT}/src/actions" -I"${ROOT}/src/triggers" -I"${ROOT}/src/transport" -I"${ROOT}/src/ui" \
+  "${ROOT}/src/rules/rule_types.c" "${ROOT}/src/rules/capability_registry.c" "${ROOT}/src/rules/rule_engine.c" "${ROOT}/src/triggers/trigger_sources.c" "${ROOT}/src/actions/action_dispatcher.c" "${ROOT}/src/board/m5pm1.c" "${ROOT}/src/board/board_power.c" "${ROOT}/src/board/bmi270.c" "${ROOT}/src/board/board_adc.c" "${ROOT}/src/board/hardware_fact_service.c" "${ROOT}/tests/host/fakes/fake_register_bus.c" "${ROOT}/src/rules/rule_runtime.c" "${ROOT}/src/rules/rule_config_store.c" "${ROOT}/src/actions/action_http.c" "${ROOT}/src/app/app_wifi.c" "${ROOT}/src/app/app_time.c" "${ROOT}/src/rules/rule_web.c" "${ROOT}/src/ui/ui_model.c" "${ROOT}/src/ui/ui_nav.c" "${ROOT}/generated/webui_assets.c" "${ROOT}/vendor/cjson/cJSON.c" "${ROOT}/src/triggers/trigger_gpio.c" "${ROOT}/src/triggers/trigger_hat.c" "${ROOT}/tests/host/test_external_triggers_and_web.c"
 
-compile test_uac_audio_buffer -I"${FAKE_INC}" -I"${ROOT}/src/app" -I"${ROOT}/src/audio" -I"${ROOT}/src/board" -I"${ROOT}/src/usb_audio" \
+compile test_uac_audio_buffer -pthread -I"${FAKE_INC}" -I"${ROOT}/src/app" -I"${ROOT}/src/audio" -I"${ROOT}/src/board" -I"${ROOT}/src/usb_audio" \
   "${ROOT}/src/usb_audio/uac_audio_buffer.c" "${ROOT}/tests/host/test_uac_audio_buffer.c"
 compile test_uac_config -I"${FAKE_INC}" -I"${ROOT}/src/app" -I"${ROOT}/src/audio" -I"${ROOT}/src/board" -I"${ROOT}/src/usb_audio" \
   "${ROOT}/src/usb_audio/uac_config.c" "${ROOT}/tests/host/test_uac_config.c"
@@ -106,6 +108,11 @@ compile test_uac_sources -I"${FAKE_INC}" -I"${ROOT}/tests/host/fakes" -I"${ROOT}
   "${ROOT}/src/usb_audio/uac_config.c" "${ROOT}/src/usb_audio/uac_mic_source.c" "${ROOT}/src/usb_audio/uac_speaker_sink.c" "${ROOT}/tests/host/fakes/fake_uac_board_deps.c" "${ROOT}/tests/host/test_uac_sources.c"
 compile test_uac_service -I"${FAKE_INC}" -I"${ROOT}/src/app" -I"${ROOT}/src/audio" -I"${ROOT}/src/board" -I"${ROOT}/src/usb_audio" \
   "${ROOT}/src/usb_audio/uac_service.c" "${ROOT}/tests/host/test_uac_service.c"
+compile test_uac_service_enabled -DFREERTOS_TEST_HOOKS -DCONFIG_APP_USB_UAC_DEVICE=1 -DCONFIG_APP_USB_UAC_MIC=1 -DCONFIG_APP_USB_UAC_SPEAKER=1 -DCONFIG_APP_USB_UAC_COMBINED_EXPERIMENTAL=1 -DCONFIG_APP_USB_UAC_SIMULTANEOUS_MIC_SPEAKER=1 \
+  -I"${FAKE_INC}" -I"${ROOT}/src/audio" -I"${ROOT}/src/board" -I"${ROOT}/src/usb_audio" \
+  "${ROOT}/src/usb_audio/uac_service.c" "${ROOT}/src/usb_audio/uac_config.c" "${ROOT}/src/usb_audio/uac_audio_buffer.c" "${ROOT}/src/usb_audio/uac_device_adapter.c" \
+  "${ROOT}/src/usb_audio/uac_mic_source.c" "${ROOT}/src/usb_audio/uac_speaker_sink.c" "${ROOT}/tests/host/fakes/fake_uac_board_deps.c" "${ROOT}/tests/host/test_uac_service_enabled.c"
+for scenario in 0 1 2 3; do "${BUILD_DIR}/test_uac_service_enabled" "$scenario"; done
 "${BUILD_DIR}/test_uac_audio_buffer"
 "${BUILD_DIR}/test_uac_config"
 "${BUILD_DIR}/test_uac_device_adapter"
@@ -139,6 +146,7 @@ compile test_uac_service -I"${FAKE_INC}" -I"${ROOT}/src/app" -I"${ROOT}/src/audi
 "${BUILD_DIR}/test_capability_hardware_enabled"
 "${BUILD_DIR}/test_capability_hardware_disabled"
 "${BUILD_DIR}/test_capability_sound_disabled"
+"${BUILD_DIR}/test_capability_omitted"
 "${BUILD_DIR}/test_rule_engine"
 "${BUILD_DIR}/test_trigger_sources"
 "${BUILD_DIR}/test_action_dispatcher"

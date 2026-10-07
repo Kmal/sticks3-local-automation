@@ -16,7 +16,7 @@
 #define CONFIG_APP_SOUND_LEVEL_READ_TIMEOUT_MS 20
 #endif
 #ifndef CONFIG_APP_SOUND_LEVEL_CALIBRATE_ON_START
-#define CONFIG_APP_SOUND_LEVEL_CALIBRATE_ON_START 1
+#define CONFIG_APP_SOUND_LEVEL_CALIBRATE_ON_START 0
 #endif
 #ifndef CONFIG_APP_SOUND_LEVEL_CALIBRATION_WINDOWS
 #define CONFIG_APP_SOUND_LEVEL_CALIBRATION_WINDOWS 30
@@ -59,7 +59,15 @@ bool sound_level_service_init(sound_level_service_t *service,
     }
 
     memset(service, 0, sizeof(*service));
-    service->state = SOUND_LEVEL_SERVICE_STOPPED;
+    service->status_mutex = xSemaphoreCreateMutex();
+    if (service->status_mutex == NULL) return false;
+    atomic_init(&service->state, SOUND_LEVEL_SERVICE_STOPPED);
+    atomic_init(&service->task, NULL);
+    atomic_init(&service->stop_requested, false);
+    atomic_init(&service->read_errors, 0);
+    atomic_init(&service->emitted_windows, 0);
+    atomic_init(&service->underrun_windows, 0);
+    atomic_init(&service->dropped_runtime_lock_count, 0);
     service->runtime = runtime;
     service->runtime_mutex = runtime_mutex;
     service->config = *config;
@@ -85,19 +93,27 @@ bool sound_level_service_start(sound_level_service_t *service)
     }
 
     service->state = SOUND_LEVEL_SERVICE_STARTING;
+    TaskHandle_t task = NULL;
     BaseType_t ok = xTaskCreate(sound_level_task,
                                 "sound_level",
                                 4096,
                                 service,
                                 tskIDLE_PRIORITY + 1,
-                                &service->task);
+                                &task);
     if (ok != pdPASS) {
         service->state = SOUND_LEVEL_SERVICE_ERROR;
         service->task = NULL;
         return false;
     }
-
+    service->task = task;
     return true;
+}
+
+void sound_level_service_deinit(sound_level_service_t *service)
+{
+    if (service == NULL || service->task != NULL) return;
+    if (service->status_mutex != NULL) vSemaphoreDelete(service->status_mutex);
+    service->status_mutex = NULL;
 }
 
 void sound_level_service_request_stop(sound_level_service_t *service)
@@ -114,11 +130,14 @@ bool sound_level_service_is_running(const sound_level_service_t *service)
 
 bool sound_level_service_get_last_metrics(const sound_level_service_t *service, audio_level_metrics_t *out)
 {
-    if (service == NULL || out == NULL || !service->last_metrics_valid) {
+    if (service == NULL || out == NULL || service->status_mutex == NULL ||
+        xSemaphoreTake(service->status_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
         return false;
     }
-    *out = service->last_metrics;
-    return true;
+    const bool valid = service->last_metrics_valid;
+    if (valid) *out = service->last_metrics;
+    xSemaphoreGive(service->status_mutex);
+    return valid;
 }
 
 sound_level_service_state_t sound_level_service_get_state(const sound_level_service_t *service)
@@ -152,6 +171,7 @@ bool sound_level_service_build_status_json(const sound_level_service_t *service,
         return written > 0 && (size_t)written < out_len;
     }
 
+    if (service->status_mutex == NULL || xSemaphoreTake(service->status_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return false;
     const audio_level_metrics_t *m = &service->last_metrics;
     int written = snprintf(out, out_len,
                            "{\"enabled\":true,"
@@ -179,6 +199,7 @@ bool sound_level_service_build_status_json(const sound_level_service_t *service,
                            (unsigned long)service->read_errors,
                            (unsigned long)service->underrun_windows,
                            (unsigned long)service->dropped_runtime_lock_count);
+    xSemaphoreGive(service->status_mutex);
     return written > 0 && (size_t)written < out_len;
 }
 
@@ -244,8 +265,11 @@ static bool sound_level_finalize_window(sound_level_service_t *service, uint32_t
         return false;
     }
 
-    service->last_metrics = metrics;
-    service->last_metrics_valid = true;
+    if (xSemaphoreTake(service->status_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        service->last_metrics = metrics;
+        service->last_metrics_valid = true;
+        xSemaphoreGive(service->status_mutex);
+    }
 
     if (service->calibration.active) {
         audio_calibration_add_window(&service->calibration, &metrics);

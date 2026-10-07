@@ -17,14 +17,6 @@ typedef struct {
     char rule_name[RULE_NAME_MAX];
 } rule_event_t;
 
-/* One rule's actions are admitted together, including under backpressure. */
-typedef struct {
-    size_t event_count;
-    rule_event_t events[RULE_MAX_ACTIONS_PER_RULE];
-} rule_event_batch_t;
-
-typedef bool (*rule_event_batch_sink_t)(const rule_event_batch_t *batch, void *ctx);
-
 typedef struct {
     automation_config_t config;
     struct {
@@ -34,13 +26,27 @@ typedef struct {
         bool has_last_fire;
         uint32_t last_fire_ms;
         uint32_t fire_count;
+        rule_value_t last_value;
+        bool pending_pulse;
     } state[RULE_MAX_RULES];
     uint32_t next_event_sequence;
 } rule_engine_t;
 
+/* Accept all actions of one rule together. False leaves it pending for retry. */
+typedef struct {
+    size_t event_count;
+    rule_event_t events[RULE_MAX_ACTIONS_PER_RULE];
+} rule_event_batch_t;
+
+typedef bool (*rule_event_batch_sink_t)(const rule_event_batch_t *batch, void *ctx);
+
 bool rule_engine_init(rule_engine_t *engine, const automation_config_t *config);
 bool rule_engine_replace_config(rule_engine_t *engine, const automation_config_t *config);
 size_t rule_engine_process_fact(rule_engine_t *engine, const trigger_fact_t *fact, rule_event_t *events, size_t max_events);
-size_t rule_engine_process_fact_with_sink(rule_engine_t *engine, const trigger_fact_t *fact,
-                                         rule_event_batch_sink_t sink, void *ctx);
+size_t rule_engine_process_fact_to_sink(rule_engine_t *engine, const trigger_fact_t *fact,
+                                      rule_event_batch_sink_t sink, void *ctx);
+size_t rule_engine_tick_to_sink(rule_engine_t *engine, uint32_t uptime_ms,
+                              rule_event_batch_sink_t sink, void *ctx);
 const automation_rule_t *rule_engine_get_rule_by_id(const rule_engine_t *engine, uint32_t rule_id);
+
+size_t rule_engine_process_fact_with_sink(rule_engine_t *engine, const trigger_fact_t *fact, rule_event_batch_sink_t sink, void *ctx);

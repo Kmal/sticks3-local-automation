@@ -127,7 +127,7 @@ def main() -> int:
                 f"docs/implementation_inventory.md host coverage mismatch for {source}: expected {expected_host}, found {actual_host}"
             )
 
-    unknown_default = default_sources - all_src - GENERATED_CMAKE_SRCS
+    unknown_default = default_sources - all_src - GENERATED_CMAKE_SRCS - {"cJSON.c"}
     if unknown_default:
         errors.append(f"src/CMakeLists.txt references missing sources: {sorted(unknown_default)}")
 

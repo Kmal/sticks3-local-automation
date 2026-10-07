@@ -3,23 +3,19 @@
 #include "board_sticks3.h"
 #include "esp_log.h"
 #include "sdkconfig.h"
+#include "capability_registry.h"
 
-/* The production sdkconfig defaults compile these hardware facts by default.
- * Keep fallback values here so host tests and older generated sdkconfig headers
- * exercise the same default-available behavior unless a test overrides them. */
 #ifndef CONFIG_APP_BATTERY_FACTS
-#ifdef CONFIG_APP_POWER_FACTS
-#define CONFIG_APP_BATTERY_FACTS CONFIG_APP_POWER_FACTS
-#else
-#define CONFIG_APP_BATTERY_FACTS 1
-#endif
+#define CONFIG_APP_BATTERY_FACTS 0
 #endif
 #ifndef CONFIG_APP_USB_POWER_FACTS
-#ifdef CONFIG_APP_POWER_FACTS
-#define CONFIG_APP_USB_POWER_FACTS CONFIG_APP_POWER_FACTS
-#else
-#define CONFIG_APP_USB_POWER_FACTS 1
+#define CONFIG_APP_USB_POWER_FACTS 0
 #endif
+#ifndef CONFIG_APP_BMI270_FACTS
+#define CONFIG_APP_BMI270_FACTS 0
+#endif
+#ifndef CONFIG_APP_ADC_FACTS
+#define CONFIG_APP_ADC_FACTS 0
 #endif
 
 #include <stdio.h>
@@ -68,6 +64,7 @@ hardware_fact_service_config_t hardware_fact_service_default_config(void)
         .enable_usb_power = CONFIG_APP_USB_POWER_FACTS,
         .enable_bmi270 = CONFIG_APP_BMI270_FACTS,
         .enable_adc = CONFIG_APP_ADC_FACTS,
+        .adc_gpio_mask = UINT32_MAX,
         .poll_interval_ms = CONFIG_APP_HARDWARE_FACT_POLL_INTERVAL_MS,
         .power = {
             .usb_present_mv_threshold = CONFIG_APP_POWER_USB_PRESENT_MV,
@@ -79,7 +76,29 @@ hardware_fact_service_config_t hardware_fact_service_default_config(void)
             .still_hysteresis_mg = 30,
             .min_interval_ms = CONFIG_APP_HARDWARE_FACT_POLL_INTERVAL_MS,
         },
-    };
+};
+}
+
+void hardware_fact_service_config_for_rules(hardware_fact_service_config_t *out, const automation_config_t *rules)
+{
+    *out = hardware_fact_service_default_config();
+    out->enable_battery &= automation_config_has_enabled_source(rules, RULE_SOURCE_BATTERY_PERCENT);
+    out->enable_usb_power &= automation_config_has_enabled_source(rules, RULE_SOURCE_POWER_USB_PRESENT);
+    out->enable_bmi270 &= automation_config_has_enabled_source(rules, RULE_SOURCE_BMI270_MOTION);
+    out->enable_adc &= automation_config_has_enabled_source(rules, RULE_SOURCE_ADC_VOLTAGE_MV);
+    out->adc_gpio_mask = 0;
+    if (rules != NULL) for (size_t i = 0; i < rules->rule_count; ++i) {
+        const automation_rule_t *rule = &rules->rules[i];
+        if (!rule->enabled || rule->when.source != RULE_SOURCE_ADC_VOLTAGE_MV) continue;
+        for (int pin = 4; pin <= 10; ++pin) if (capability_adc_key_matches_pin(rule->when.source_key, pin)) out->adc_gpio_mask |= 1u << pin;
+    }
+}
+
+void hardware_fact_service_deinit(hardware_fact_service_t *service)
+{
+    if (service == NULL) return;
+    board_adc_deinit(&service->adc);
+    memset(service, 0, sizeof(*service));
 }
 
 esp_err_t hardware_fact_service_init(hardware_fact_service_t *service,
@@ -105,7 +124,7 @@ esp_err_t hardware_fact_service_init(hardware_fact_service_t *service,
             service->config.enable_bmi270 = false;
         }
     }
-    if (service->config.enable_adc && board_adc_init(&service->adc) != ESP_OK) {
+    if (service->config.enable_adc && board_adc_init_mask(&service->adc, service->config.adc_gpio_mask) != ESP_OK) {
         ESP_LOGW(TAG, "ADC unavailable; disabling ADC facts");
         service->config.enable_adc = false;
     }
@@ -172,7 +191,7 @@ size_t hardware_fact_service_poll(hardware_fact_service_t *service,
         size_t count = 0;
         const board_adc_channel_desc_t *channels = board_adc_channels(&count);
         for (size_t i = 0; i < count; ++i) {
-            if (!channels[i].safe_for_user_rules) {
+            if (!channels[i].safe_for_user_rules || (service->config.adc_gpio_mask & (1u << channels[i].gpio)) == 0) {
                 continue;
             }
             board_adc_sample_t sample;

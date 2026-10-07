@@ -2,6 +2,18 @@
 
 #include "sdkconfig.h"
 
+#ifndef CONFIG_APP_USB_UAC_MIC
+#define CONFIG_APP_USB_UAC_MIC 0
+#endif
+#ifndef CONFIG_APP_USB_UAC_SPEAKER
+#define CONFIG_APP_USB_UAC_SPEAKER 0
+#endif
+#ifndef CONFIG_APP_USB_UAC_COMBINED_EXPERIMENTAL
+#define CONFIG_APP_USB_UAC_COMBINED_EXPERIMENTAL 0
+#endif
+#ifndef CONFIG_APP_USB_UAC_SIMULTANEOUS_MIC_SPEAKER
+#define CONFIG_APP_USB_UAC_SIMULTANEOUS_MIC_SPEAKER 0
+#endif
 #if CONFIG_APP_USB_UAC_DEVICE
 #include "board_audio.h"
 #include "board_i2s.h"
@@ -16,6 +28,7 @@
 #include "uac_speaker_sink.h"
 
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
 
 static const char *TAG = "UAC_SERVICE";
@@ -29,6 +42,8 @@ typedef struct {
     uac_device_adapter_t adapter;
     TaskHandle_t mic_task;
     TaskHandle_t speaker_task;
+    atomic_bool running;
+    bool start_attempted;
     bool simultaneous_owner;
     bool mic_bridge_task_enabled;
     bool speaker_bridge_task_enabled;
@@ -61,6 +76,10 @@ static void uac_service_mic_task(void *ctx)
     uac_service_t *svc = (uac_service_t *)ctx;
     int16_t samples[128];
     while (true) {
+        if (!atomic_load_explicit(&svc->running, memory_order_acquire)) {
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
+        }
         size_t samples_read = 0;
         esp_err_t err = svc->simultaneous_owner
                             ? board_i2s_read_mono_i16(samples, sizeof(samples) / sizeof(samples[0]), &samples_read, 20)
@@ -78,6 +97,10 @@ static void uac_service_speaker_task(void *ctx)
     uac_service_t *svc = (uac_service_t *)ctx;
     int16_t samples[128];
     while (true) {
+        if (!atomic_load_explicit(&svc->running, memory_order_acquire)) {
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
+        }
         (void)uac_audio_buffer_read_or_silence(&svc->speaker_buffer, (uint8_t *)samples, sizeof(samples));
         size_t samples_written = 0;
         if (svc->simultaneous_owner) {
@@ -141,6 +164,8 @@ static esp_err_t uac_service_init_audio(uac_service_t *svc)
 
 esp_err_t uac_service_start_from_kconfig(void)
 {
+    if (s_uac.start_attempted) return ESP_ERR_INVALID_STATE;
+    s_uac.start_attempted = true;
     uac_audio_config_t config = {
         .uac_enabled = CONFIG_APP_USB_UAC_DEVICE,
         .mic_enabled = CONFIG_APP_USB_UAC_MIC,
@@ -188,6 +213,9 @@ esp_err_t uac_service_start_from_kconfig(void)
     err = uac_service_init_audio(&s_uac);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "UAC audio init failed: %s", esp_err_to_name(err));
+        (void)uac_mic_source_stop();
+        (void)uac_speaker_sink_stop();
+        (void)board_audio_deinit();
         uac_service_release_buffers(&s_uac);
         return err;
     }
@@ -195,25 +223,46 @@ esp_err_t uac_service_start_from_kconfig(void)
     err = uac_device_adapter_init(&s_uac.adapter, &s_uac.runtime, has_mic ? &s_uac.mic_buffer : NULL,
                                   has_speaker ? &s_uac.speaker_buffer : NULL);
     if (err != ESP_OK) {
+        (void)uac_mic_source_stop();
+        (void)uac_speaker_sink_stop();
+        (void)board_audio_deinit();
         uac_service_release_buffers(&s_uac);
         return err;
+    }
+    /* Allocate bridge tasks before registering callbacks. They wait for running. */
+    if (s_uac.mic_bridge_task_enabled && xTaskCreate(uac_service_mic_task, "uac_mic", 4096, &s_uac, tskIDLE_PRIORITY + 5, &s_uac.mic_task) != pdPASS) {
+        err = ESP_ERR_NO_MEM;
+        goto task_failure;
+    }
+    if (s_uac.speaker_bridge_task_enabled && xTaskCreate(uac_service_speaker_task, "uac_spk", 4096, &s_uac, tskIDLE_PRIORITY + 5, &s_uac.speaker_task) != pdPASS) {
+        err = ESP_ERR_NO_MEM;
+        goto task_failure;
     }
     err = uac_esp_device_start(&s_uac.adapter);
     if (err != ESP_OK) {
-        uac_service_release_buffers(&s_uac);
+        /* usb_device_uac 1.2.3 exposes no stop/deinit API. Its failure may
+         * leave callbacks registered: retain callback storage until reboot. */
+        if (s_uac.mic_task != NULL) vTaskDelete(s_uac.mic_task);
+        if (s_uac.speaker_task != NULL) vTaskDelete(s_uac.speaker_task);
+        s_uac.mic_task = s_uac.speaker_task = NULL;
+        (void)uac_mic_source_stop();
+        (void)uac_speaker_sink_stop();
+        (void)board_audio_deinit();
         return err;
     }
-    if (s_uac.mic_bridge_task_enabled && xTaskCreate(uac_service_mic_task, "uac_mic", 4096, &s_uac, tskIDLE_PRIORITY + 5, &s_uac.mic_task) != pdPASS) {
-        uac_service_release_buffers(&s_uac);
-        return ESP_ERR_NO_MEM;
-    }
-    if (s_uac.speaker_bridge_task_enabled && xTaskCreate(uac_service_speaker_task, "uac_spk", 4096, &s_uac, tskIDLE_PRIORITY + 5, &s_uac.speaker_task) != pdPASS) {
-        uac_service_release_buffers(&s_uac);
-        return ESP_ERR_NO_MEM;
-    }
+    atomic_store_explicit(&s_uac.running, true, memory_order_release);
     ESP_LOGI(TAG, "UAC service started: mode=%s rate=%lu", uac_audio_mode_name(s_uac.runtime.mode),
              (unsigned long)s_uac.runtime.sample_rate_hz);
     return ESP_OK;
+task_failure:
+    if (s_uac.mic_task != NULL) vTaskDelete(s_uac.mic_task);
+    if (s_uac.speaker_task != NULL) vTaskDelete(s_uac.speaker_task);
+    s_uac.mic_task = s_uac.speaker_task = NULL;
+    (void)uac_mic_source_stop();
+    (void)uac_speaker_sink_stop();
+    (void)board_audio_deinit();
+    uac_service_release_buffers(&s_uac);
+    return err;
 }
 #else
 esp_err_t uac_service_start_from_kconfig(void)

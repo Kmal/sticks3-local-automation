@@ -301,6 +301,11 @@ bool automation_rule_validate(const automation_rule_t *rule, char *error, size_t
         set_error(error, error_len, "sustain is too long");
         return false;
     }
+    if (rule->when.sustain_ms != 0 && (rule->when.source == RULE_SOURCE_KEY1_SHORT ||
+        rule->when.source == RULE_SOURCE_KEY2_SHORT || rule->when.source == RULE_SOURCE_GPIO_EDGE)) {
+        set_error(error, error_len, "momentary events cannot sustain");
+        return false;
+    }
     if (rule->cooldown_ms < RULE_MIN_COOLDOWN_MS || rule->cooldown_ms > RULE_MAX_COOLDOWN_MS) {
         set_error(error, error_len, "invalid cooldown");
         return false;
@@ -317,6 +322,10 @@ bool automation_rule_validate(const automation_rule_t *rule, char *error, size_t
         if (!capability_gpio_source_profile_validate(rule->when.source, &rule->when.gpio, error, error_len)) {
             return false;
         }
+    }
+    if (rule->when.source == RULE_SOURCE_ADC_VOLTAGE_MV && !capability_adc_key_valid(rule->when.source_key)) {
+        set_error(error, error_len, "invalid adc source key");
+        return false;
     }
 
     for (size_t i = 0; i < rule->action_count; ++i) {
@@ -387,8 +396,32 @@ bool automation_config_validate(const automation_config_t *config, char *error, 
         return false;
     }
     for (size_t i = 0; i < config->rule_count; ++i) {
+        if (config->rules[i].id == 0) {
+            set_error(error, error_len, "rule id must be nonzero");
+            return false;
+        }
+        for (size_t j = 0; j < i; ++j) if (config->rules[j].id == config->rules[i].id) {
+            set_error(error, error_len, "duplicate rule id");
+            return false;
+        }
         if (!automation_rule_validate(&config->rules[i], error, error_len)) {
             return false;
+        }
+        const automation_rule_t *rule = &config->rules[i];
+        if (!rule->enabled || !rule_source_is_gpio(rule->when.source)) continue;
+        for (size_t j = 0; j < config->rule_count; ++j) {
+            const automation_rule_t *other = &config->rules[j];
+            if (!other->enabled) continue;
+            if (other->when.source == RULE_SOURCE_ADC_VOLTAGE_MV &&
+                capability_adc_key_matches_pin(other->when.source_key, rule->when.gpio.pin)) {
+                set_error(error, error_len, "adc and gpio cannot share a pin");
+                return false;
+            }
+            if (rule_source_is_gpio(other->when.source) && other->when.gpio.pin == rule->when.gpio.pin &&
+                other->when.gpio.active_low != rule->when.gpio.active_low) {
+                set_error(error, error_len, "conflicting gpio pull configuration");
+                return false;
+            }
         }
     }
     return true;

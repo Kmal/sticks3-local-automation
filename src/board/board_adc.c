@@ -36,6 +36,21 @@ int board_adc_apply_divider_mv(int measured_mv, const board_adc_channel_desc_t *
 
 esp_err_t board_adc_init(board_adc_context_t *ctx)
 {
+    return board_adc_init_mask(ctx, UINT32_MAX);
+}
+
+void board_adc_deinit(board_adc_context_t *ctx)
+{
+    if (ctx == NULL) return;
+#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
+    if (ctx->cali_adc1 != NULL) (void)adc_cali_delete_scheme_curve_fitting((adc_cali_handle_t)ctx->cali_adc1);
+#endif
+    if (ctx->adc1 != NULL) (void)adc_oneshot_del_unit(ctx->adc1);
+    memset(ctx, 0, sizeof(*ctx));
+}
+
+esp_err_t board_adc_init_mask(board_adc_context_t *ctx, uint32_t gpio_mask)
+{
     if (ctx == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -47,10 +62,13 @@ esp_err_t board_adc_init(board_adc_context_t *ctx)
     }
     adc_oneshot_chan_cfg_t chan_cfg = {.atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_DEFAULT};
     for (size_t i = 0; i < sizeof(s_adc_channels) / sizeof(s_adc_channels[0]); ++i) {
+        if ((gpio_mask & (1u << s_adc_channels[i].gpio)) == 0) continue;
         err = adc_oneshot_config_channel(ctx->adc1, s_adc_channels[i].channel, &chan_cfg);
         if (err != ESP_OK) {
+            board_adc_deinit(ctx);
             return err;
         }
+        ctx->gpio_mask |= 1u << s_adc_channels[i].gpio;
     }
 #if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
     adc_cali_curve_fitting_config_t cali_cfg = {.unit_id = ADC_UNIT_1, .atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_DEFAULT};
@@ -70,7 +88,8 @@ esp_err_t board_adc_read_mv(board_adc_context_t *ctx,
                             const board_adc_channel_desc_t *channel,
                             board_adc_sample_t *out_sample)
 {
-    if (ctx == NULL || channel == NULL || out_sample == NULL || !ctx->initialized) {
+    if (ctx == NULL || channel == NULL || out_sample == NULL || !ctx->initialized ||
+        channel->gpio < 0 || channel->gpio >= 32 || (ctx->gpio_mask & (1u << channel->gpio)) == 0) {
         return ESP_ERR_INVALID_ARG;
     }
     memset(out_sample, 0, sizeof(*out_sample));

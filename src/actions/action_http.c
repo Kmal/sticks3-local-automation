@@ -17,6 +17,7 @@ bool action_http_network_ready(void)
 
 #ifdef ESP_PLATFORM
 #include "esp_http_client.h"
+#include "esp_crt_bundle.h"
 #endif
 
 static bool url_has_supported_scheme_and_host(const char *url)
@@ -72,6 +73,7 @@ action_http_result_t action_http_post_event(const rule_action_t *action, const r
     esp_http_client_config_t config = {
         .url = action->http_url,
         .timeout_ms = (int)action->timeout_ms,
+        .crt_bundle_attach = esp_crt_bundle_attach,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client == NULL) {

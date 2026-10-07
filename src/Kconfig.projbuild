@@ -208,6 +208,7 @@ menu "StickS3 speaker actions"
 
 config APP_SPEAKER_ACTION
     bool "Enable speaker tone automation action"
+    depends on !APP_USB_UAC_DEVICE
     default y
     help
         Allow automation rules to play a short tone through the StickS3 ES8311
@@ -222,6 +223,7 @@ menu "StickS3 sound-level triggers"
 
 config APP_SOUND_LEVEL_TRIGGERS
     bool "Enable sound-level trigger capture"
+    depends on !APP_USB_UAC_DEVICE
     default y
 
 config APP_SOUND_LEVEL_SAMPLE_RATE_HZ

@@ -45,15 +45,15 @@ This inventory is generated from direct source inspection of `src/**/*.c`, `src/
 | `trigger_gpio.c` | default | yes | Safe GPIO digital/edge trigger initialization and polling with debounce and source-key generation. |
 | `trigger_hat.c` | default | yes | HAT source probe path deliberately returns unsupported. |
 | `trigger_sources.c` | default | yes | Emits normalized sound, button, and direct facts into a runtime sink. |
-| `uac_audio_buffer.c` | conditional | yes | USB Audio Class ring-buffer helper linked only by `CONFIG_APP_USB_UAC_DEVICE`; host tests cover wraparound, underrun-to-silence, overrun counters, and byte accounting. |
+| `uac_audio_buffer.c` | conditional | yes | USB Audio Class ring-buffer helper linked only by `CONFIG_APP_USB_UAC_DEVICE`; host tests cover wraparound, underrun-to-silence, overrun counters, byte accounting, and concurrent producer/consumer integrity across position overflow. |
 | `uac_config.c` | conditional | yes | USB Audio Class mode/config resolver linked only by explicit UAC builds; validates mic-only, speaker-only, combined descriptor, simultaneous mic+speaker, sample-rate, ring-buffer, and safe-volume policy. |
 | `uac_device_adapter.c` | conditional | yes | Callback-safe UAC adapter linked only by explicit UAC builds; maps descriptor direction plans to ring-buffer input/output callbacks and clamps volume without touching codec/I2S in callbacks. |
 | `uac_esp_device.c` | conditional | no | Thin ESP-IDF adapter linked only by explicit UAC builds; maps the project adapter to Espressif `usb_device_uac` fields (`input_cb`, `output_cb`, mute, volume, context, and TinyUSB init flag). |
 | `uac_mic_source.c` | conditional | yes | USB microphone PCM source linked only by explicit UAC builds; reuses the existing capture-only ES8311/I2S path and exposes bounded host-tested reads/stats. |
 | `uac_speaker_sink.c` | conditional | yes | USB speaker PCM sink linked only by explicit UAC builds; reuses the existing playback-only ES8311/I2S path, requires audio power, and clamps volume below 75%. |
-| `uac_service.c` | conditional | yes | Opt-in USB Audio Class service linked only by `CONFIG_APP_USB_UAC_DEVICE`; resolves Kconfig, allocates direction ring buffers, starts the selected board-audio owner, initializes Espressif UAC, and starts microphone/speaker bridge tasks. |
+| `uac_service.c` | conditional | yes | Opt-in USB Audio Class service linked only by `CONFIG_APP_USB_UAC_DEVICE`; resolves Kconfig, allocates direction ring buffers, starts the selected board-audio owner, creates gated bridge tasks before registering Espressif UAC callbacks; enabled-path tests exercise task failures and retained callbacks after USB initialization failure. |
 | `ui_keyboard.c` | default | yes | 9-key overlay input model for SSID/password/AP/time fields, including explicit cancel result support and menu-edit cancel metadata coverage. |
-| `ui_model.c` | default | no | Menu/application model for Wi-Fi, AP, Bluetooth, automation editing, Web UI service state, and time settings. |
+| `ui_model.c` | default | yes | Menu/application model for Wi-Fi, AP, Bluetooth, automation editing, Web UI service state, and time settings. |
 | `ui_nav.c` | default | yes | Menu graph/navigation state machine for the status UI. |
 | `ui_render.c` | default | no | LCD rendering of status bar, menus, Wi-Fi/AP/BLE/automation/settings screens, toasts, and keyboard overlay. |
 
@@ -66,3 +66,21 @@ Compiled by the default `config/sdkconfig.defaults` profile and emitted when the
 * `power.usb_present` — default-enabled by `CONFIG_APP_USB_POWER_FACTS=y`.
 * `bmi270.motion` — default-enabled by `CONFIG_APP_BMI270_FACTS=y`.
 * `adc.voltage_mv` — default-enabled by `CONFIG_APP_ADC_FACTS=y`.
+
+## Correctness review follow-up
+
+The local review dated 2026-10-06 corrected LCD configuration stack allocations, pulse versus state trigger semantics, timer-driven sustain and queue retries, complete/masked configuration round-trips, disabled-feature defaults, hardware sampling demand and ADC/GPIO ownership, startup failure handling, audio lifetime synchronization, HTTPS trust attachment, and isolated UAC build configurations. `ui_model.c` now has integration coverage for retaining existing action parameters and extra actions during LCD saves.
+
+The HTTP configuration parser also links the vendored upstream `vendor/cjson/cJSON.c` (v1.7.19, MIT license); this is external code outside `src/**/*.c`, so it is documented here rather than added to the project-source inventory table. Its source, header, license, and hashes are recorded in `vendor/cjson/README.md`.
+
+UAC remains opt-in. The mic/speaker profile defaults match actual Espressif USB descriptor sample rate and channel counts to the 16 kHz mono bridge. Compile-time assertions reject mismatches. Local microphone monitoring and speaker actions are unavailable while USB owns the codec. `usb_device_uac` 1.2.3 has no stop/deinit API: after partial USB initialization failure, bridge tasks and board audio stop, while callback buffers remain allocated until reboot to prevent dangling driver callbacks. Startup cannot be retried in that boot.
+
+Build a UAC profile using a separate build directory and sdkconfig, for example:
+
+```sh
+idf.py -B build-uac-mic -D SDKCONFIG="$PWD/build-uac-mic/sdkconfig" \
+  -D 'SDKCONFIG_DEFAULTS=config/sdkconfig.defaults;config/sdkconfig.uac-mic.defaults' \
+  -D IDF_TARGET=esp32s3 build
+```
+
+Use `speaker` in both profile paths for the speaker-only build. Compilation and host tests are software evidence. Physical qualification remains governed by `docs/hardware_qualification.md`.

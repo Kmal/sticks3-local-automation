@@ -334,6 +334,115 @@ static void test_replace_config_rejects_invalid(void)
     ASSERT_EQ(0, rule_runtime_replace_config(&runtime, &config));
 }
 
+
+static void test_repeated_pulses_and_full_fanout(void)
+{
+    automation_config_t config = runtime_config();
+    config.rule_count = RULE_MAX_RULES;
+    for (size_t i = 0; i < RULE_MAX_RULES; ++i) {
+        config.rules[i] = config.rules[0];
+        config.rules[i].id = (uint32_t)i + 1;
+        config.rules[i].action_count = RULE_MAX_ACTIONS_PER_RULE;
+        for (size_t j = 0; j < RULE_MAX_ACTIONS_PER_RULE; ++j) config.rules[i].actions[j] = config.rules[0].actions[0];
+    }
+    rule_runtime_t runtime;
+    int calls = 0;
+    ASSERT_TRUE(rule_runtime_init(&runtime, &config));
+    rule_runtime_set_local_ui_sender(&runtime, fake_runtime_local_ui_sender, &calls);
+    ASSERT_TRUE(!runtime.hardware_facts.config.enable_battery);
+    ASSERT_TRUE(!runtime.hardware_facts.config.enable_usb_power);
+    ASSERT_TRUE(!runtime.hardware_facts.config.enable_bmi270);
+    ASSERT_TRUE(!runtime.hardware_facts.config.enable_adc);
+    (void)rule_runtime_process_button_event(&runtime, BUTTON_STATE_EVENT_KEY1_SHORT, 10);
+    for (unsigned i = 0; i < 8; ++i) (void)rule_runtime_tick(&runtime, 11 + i);
+    ASSERT_EQ(24, calls);
+    (void)rule_runtime_process_button_event(&runtime, BUTTON_STATE_EVENT_KEY1_SHORT, 50);
+    ASSERT_EQ(24, calls);
+    (void)rule_runtime_process_button_event(&runtime, BUTTON_STATE_EVENT_KEY1_SHORT, 200);
+    for (unsigned i = 0; i < 8; ++i) (void)rule_runtime_tick(&runtime, 201 + i);
+    ASSERT_EQ(48, calls);
+    for (size_t i = 0; i < RULE_MAX_RULES; ++i) ASSERT_EQ(2, runtime.engine.state[i].fire_count);
+}
+
+static void test_state_sustain_without_second_fact(void)
+{
+    automation_config_t config = runtime_config();
+    config.rules[0].when.source = RULE_SOURCE_WIFI_CONNECTED;
+    config.rules[0].when.sustain_ms = 250;
+    rule_runtime_t runtime;
+    int calls = 0;
+    ASSERT_TRUE(rule_runtime_init(&runtime, &config));
+    rule_runtime_set_local_ui_sender(&runtime, fake_runtime_local_ui_sender, &calls);
+    trigger_fact_t fact = {.source = RULE_SOURCE_WIFI_CONNECTED, .value = rule_value_bool(true), .uptime_ms = UINT32_MAX - 100};
+    ASSERT_EQ(0, rule_runtime_process_fact(&runtime, &fact));
+    (void)rule_runtime_tick(&runtime, 100);
+    ASSERT_EQ(0, calls);
+    (void)rule_runtime_tick(&runtime, 150);
+    ASSERT_EQ(1, calls);
+    (void)rule_runtime_tick(&runtime, 1000);
+    ASSERT_EQ(1, calls);
+}
+
+static void test_gpio_initial_high_sustain(void)
+{
+    automation_config_t config = gpio_runtime_config();
+    config.rules[0].when.sustain_ms = 250;
+    rule_runtime_t runtime;
+    int calls = 0;
+    ASSERT_TRUE(rule_runtime_init(&runtime, &config));
+    rule_runtime_set_local_ui_sender(&runtime, fake_runtime_local_ui_sender, &calls);
+    trigger_gpio_set_host_level(&runtime.gpio_triggers[0], true);
+    ASSERT_EQ(0, rule_runtime_poll_gpio(&runtime, 100));
+    ASSERT_EQ(1, rule_runtime_poll_gpio(&runtime, 111));
+    (void)rule_runtime_tick(&runtime, 360);
+    ASSERT_EQ(0, calls);
+    (void)rule_runtime_tick(&runtime, 361);
+    ASSERT_EQ(1, calls);
+}
+
+static void test_repeated_gpio_edges(void)
+{
+    automation_config_t config = gpio_runtime_config();
+    config.rules[0].when.source = RULE_SOURCE_GPIO_EDGE;
+    config.rules[0].when.gpio.profile = RULE_GPIO_PROFILE_RISING_EDGE;
+    snprintf(config.rules[0].when.source_key, RULE_SOURCE_KEY_MAX, "gpio.edge.4");
+    rule_runtime_t runtime;
+    int calls = 0;
+    ASSERT_TRUE(rule_runtime_init(&runtime, &config));
+    rule_runtime_set_local_ui_sender(&runtime, fake_runtime_local_ui_sender, &calls);
+    trigger_gpio_set_host_level(&runtime.gpio_triggers[0], false);
+    (void)rule_runtime_poll_gpio(&runtime, 0);
+    trigger_gpio_set_host_level(&runtime.gpio_triggers[0], true);
+    (void)rule_runtime_poll_gpio(&runtime, 10);
+    (void)rule_runtime_poll_gpio(&runtime, 21);
+    ASSERT_EQ(1, calls);
+    trigger_gpio_set_host_level(&runtime.gpio_triggers[0], false);
+    (void)rule_runtime_poll_gpio(&runtime, 30);
+    (void)rule_runtime_poll_gpio(&runtime, 41);
+    ASSERT_EQ(1, calls);
+    trigger_gpio_set_host_level(&runtime.gpio_triggers[0], true);
+    (void)rule_runtime_poll_gpio(&runtime, 150);
+    (void)rule_runtime_poll_gpio(&runtime, 161);
+    ASSERT_EQ(2, calls);
+}
+
+static void test_adc_demand_and_pin_conflict(void)
+{
+    automation_config_t config = hardware_runtime_config(RULE_SOURCE_ADC_VOLTAGE_MV, "grove.g9", RULE_COMPARATOR_GT, rule_value_i32(1000));
+    hardware_fact_service_config_t hardware;
+    hardware_fact_service_config_for_rules(&hardware, &config);
+    ASSERT_TRUE(hardware.enable_adc);
+    ASSERT_EQ(1u << 9, hardware.adc_gpio_mask);
+    config.rule_count = 2;
+    config.rules[1] = gpio_runtime_config().rules[0];
+    config.rules[1].id = 8;
+    config.rules[1].when.gpio.pin = 9;
+    snprintf(config.rules[1].when.source_key, RULE_SOURCE_KEY_MAX, "gpio.digital.9");
+    ASSERT_TRUE(!automation_config_validate(&config, NULL, 0));
+    config.rules[1].enabled = false;
+    ASSERT_TRUE(automation_config_validate(&config, NULL, 0));
+}
+
 static void test_repeated_button_events_respect_cooldown(void)
 {
     for (rule_source_t source = RULE_SOURCE_KEY1_SHORT; source <= RULE_SOURCE_KEY2_SHORT; ++source) {
@@ -423,11 +532,42 @@ static void test_queue_overflow_rejects_whole_rule_without_consuming_transition(
     ASSERT_EQ(3, rule_runtime_process_actions(&runtime));
 }
 
+static bool reject_config_commit(const automation_config_t *config, void *ctx)
+{
+    (void)config;
+    (*(int *)ctx)++;
+    return false;
+}
+
+static void test_failed_commit_preserves_engine_and_gpio_ownership(void)
+{
+    automation_config_t config = gpio_runtime_config();
+    rule_runtime_t runtime;
+    ASSERT_TRUE(rule_runtime_init(&runtime, &config));
+    runtime.engine.state[0].fire_count = 7;
+    runtime.engine.next_event_sequence = 19;
+    rule_engine_t previous = runtime.engine;
+    config.rules[0].enabled = false;
+    int commits = 0;
+    ASSERT_TRUE(!rule_runtime_replace_config_with_commit(&runtime, &config, reject_config_commit, &commits));
+    ASSERT_EQ(1, commits);
+    ASSERT_TRUE(memcmp(&previous, &runtime.engine, sizeof(previous)) == 0);
+    ASSERT_EQ(1, runtime.gpio_trigger_count);
+    ASSERT_TRUE(runtime.gpio_triggers[0].enabled);
+    ASSERT_EQ(previous.config.rules[0].when.gpio.pin, runtime.gpio_triggers[0].config.pin);
+}
+
 int main(void)
 {
+    test_failed_commit_preserves_engine_and_gpio_ownership();
     test_repeated_button_events_respect_cooldown();
     test_all_matching_rules_deliver_all_actions_in_order();
     test_queue_overflow_rejects_whole_rule_without_consuming_transition();
+    test_repeated_pulses_and_full_fanout();
+    test_state_sustain_without_second_fact();
+    test_adc_demand_and_pin_conflict();
+    test_repeated_gpio_edges();
+    test_gpio_initial_high_sustain();
     test_runtime_button_to_action_result();
     test_runtime_gpio_poll_to_action_result();
     test_runtime_ble_connected_fact_to_action_result();

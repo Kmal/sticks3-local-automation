@@ -4,6 +4,8 @@
 #include "app_wifi.h"
 #include "app_time.h"
 #include "webui_assets.h"
+#include "cJSON.h"
+#include <math.h>
 
 #include <stdarg.h>
 #include <stdlib.h>
@@ -11,13 +13,14 @@
 #include <stdio.h>
 #include <string.h>
 
-#define RULE_WEB_MAX_BODY 2048u
+#define RULE_WEB_MAX_BODY 32768u
+#define RULE_WEB_MAX_RESPONSE 32768u
+#define RULE_WEB_SMALL_BODY 512u
 
 #ifdef ESP_PLATFORM
 #include "esp_err.h"
 #include "esp_log.h"
 
-#define RULE_WEB_MAX_RESPONSE 16384u
 
 static const char *TAG = "RULE_WEB";
 
@@ -29,42 +32,40 @@ static esp_err_t rule_web_http_handler(httpd_req_t *req)
         return httpd_resp_send(req, (const char *)webui_index_html, (ssize_t)webui_index_html_len) == ESP_OK ? ESP_OK : ESP_FAIL;
     }
 
-    if (req->method == HTTP_POST && req->content_len >= RULE_WEB_MAX_BODY) {
+    const bool config_route = strcmp(req->uri, "/api/config") == 0;
+    const size_t body_limit = config_route ? RULE_WEB_MAX_BODY : RULE_WEB_SMALL_BODY;
+    const size_t response_limit = config_route ? RULE_WEB_MAX_RESPONSE :
+                                  (strcmp(req->uri, "/api/capabilities") == 0 ? 16384u : 2048u);
+    if (req->content_len >= body_limit) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body too large");
         return ESP_FAIL;
     }
-    const size_t body_capacity = req->method == HTTP_POST ? req->content_len + 1u : 0u;
-    char *body = body_capacity > 0 ? calloc(1, body_capacity) : NULL;
-    char *response = malloc(RULE_WEB_MAX_RESPONSE);
-    if ((body_capacity > 0 && body == NULL) || response == NULL) {
-        free(body);
-        free(response);
+    char *body = calloc(1, req->content_len + 1u);
+    char *response = malloc(response_limit);
+    if (body == NULL || response == NULL) {
+        free(body); free(response);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "rule web allocation failed");
         return ESP_FAIL;
     }
-
     if (req->method == HTTP_POST) {
         size_t received = 0;
         while (received < req->content_len) {
             int chunk = httpd_req_recv(req, body + received, req->content_len - received);
             if (chunk <= 0) {
-                free(body);
-                free(response);
-                httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "failed to read body");
+                free(body); free(response);
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "failed to read body");
                 return ESP_FAIL;
             }
             received += (size_t)chunk;
         }
-        body[received] = '\0';
-        if (received < req->content_len) {
-            free(body);
-            free(response);
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body too large");
+        if (memchr(body, '\0', received) != NULL) {
+            free(body); free(response);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid body");
             return ESP_FAIL;
         }
     }
     rule_web_method_t method = req->method == HTTP_POST ? RULE_WEB_METHOD_POST : RULE_WEB_METHOD_GET;
-    if (!rule_web_handle_request(web, method, req->uri, body, response, RULE_WEB_MAX_RESPONSE)) {
+    if (!rule_web_handle_request(web, method, req->uri, body, response, response_limit)) {
         free(body);
         free(response);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "rule web request failed");
@@ -98,12 +99,21 @@ static bool register_uri(httpd_handle_t server, const char *uri, httpd_method_t 
 
 bool rule_web_start(rule_web_t *web, rule_runtime_t *runtime, rule_config_store_t *store)
 {
+    return rule_web_start_locked(web, runtime, store, NULL, NULL, NULL);
+}
+
+bool rule_web_start_locked(rule_web_t *web, rule_runtime_t *runtime, rule_config_store_t *store,
+                           rule_web_lock_cb_t lock_cb, rule_web_unlock_cb_t unlock_cb, void *ctx)
+{
     if (web == NULL || runtime == NULL || store == NULL) {
         return false;
     }
     memset(web, 0, sizeof(*web));
     web->runtime = runtime;
     web->store = store;
+    web->runtime_lock_cb = lock_cb;
+    web->runtime_unlock_cb = unlock_cb;
+    web->runtime_lock_ctx = ctx;
 #ifdef ESP_PLATFORM
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 17;
@@ -206,8 +216,8 @@ static bool rule_web_get_status_json_unlocked(const rule_web_t *web, char *out, 
     }
     action_result_t result = rule_runtime_get_last_action_result(web->runtime);
     const int written = snprintf(out, out_len,
-                                 "{\"started\":%s,\"last_action\":%d,\"enqueue_errors\":%lu,\"capabilities_ready\":true,\"http_network_ready\":%s,\"wifi\":%s,\"sound\":%s}",
-                                 web->started ? "true" : "false", (int)result.code, (unsigned long)web->runtime->enqueue_errors,
+                                 "{\"started\":%s,\"last_action\":%d,\"capabilities_ready\":true,\"http_network_ready\":%s,\"wifi\":%s,\"sound\":%s}",
+                                 web->started ? "true" : "false", (int)result.code,
                                  action_http_network_ready() ? "true" : "false", wifi, sound);
     return written > 0 && (size_t)written < out_len;
 }
@@ -354,244 +364,200 @@ static bool json_append_string(char **cursor, size_t *remaining, const char *val
     return json_appendf(cursor, remaining, "\"");
 }
 
+static bool write_action_fields(char **cursor, size_t *remaining, const rule_action_t *action)
+{
+    return json_appendf(cursor, remaining,
+        "\"action\":\"%s\",\"action_timeout_ms\":%lu,\"http_url\":",
+        rule_action_name(action->type), (unsigned long)action->timeout_ms) &&
+        json_append_string(cursor, remaining, action->http_url) &&
+        json_appendf(cursor, remaining,
+        ",\"http_bearer_token\":\"%s\",\"speaker_frequency_hz\":%lu,\"speaker_duration_ms\":%lu,"
+        "\"speaker_volume_percent\":%u,\"ir_protocol\":%u,\"ir_carrier_hz\":%lu,"
+        "\"ir_address\":%u,\"ir_command\":%u,\"ir_repeat_count\":%u",
+        action->http_bearer_token[0] ? "masked" : "empty",
+        (unsigned long)action->speaker_frequency_hz, (unsigned long)action->speaker_duration_ms,
+        (unsigned)action->speaker_volume_percent, (unsigned)action->ir_protocol,
+        (unsigned long)action->ir_carrier_hz, (unsigned)action->ir_address,
+        (unsigned)action->ir_command, (unsigned)action->ir_repeat_count);
+}
+
+static bool write_rule_fields(char **cursor, size_t *remaining, const automation_rule_t *rule, bool legacy)
+{
+    bool ok = json_appendf(cursor, remaining, "\"id\":%lu,\"enabled\":%s,\"name\":",
+              (unsigned long)rule->id, rule->enabled ? "true" : "false") &&
+        json_append_string(cursor, remaining, rule->name) &&
+        json_appendf(cursor, remaining, ",\"source\":\"%s\",\"source_key\":", rule_source_name(rule->when.source)) &&
+        json_append_string(cursor, remaining, rule->when.source_key) &&
+        json_appendf(cursor, remaining,
+        ",\"comparator\":\"%s\",\"threshold_kind\":\"%s\",\"threshold_bool\":%s,\"threshold_i32\":%ld,"
+        "\"cooldown_ms\":%lu,\"sustain_ms\":%lu,\"gpio_pin\":%d,\"gpio_profile\":\"%s\","
+        "\"gpio_active_low\":%s,\"gpio_debounce_ms\":%lu",
+        comparator_name(rule->when.comparator), rule->when.threshold.kind == RULE_VALUE_I32 ? "i32" : "bool",
+        rule->when.threshold.kind == RULE_VALUE_BOOL && rule->when.threshold.as.bool_value ? "true" : "false",
+        (long)(rule->when.threshold.kind == RULE_VALUE_I32 ? rule->when.threshold.as.i32_value : 0),
+        (unsigned long)rule->cooldown_ms, (unsigned long)rule->when.sustain_ms,
+        rule->when.gpio.pin, gpio_profile_name(rule->when.gpio.profile), rule->when.gpio.active_low ? "true" : "false",
+        (unsigned long)rule->when.gpio.debounce_ms);
+    if (legacy) return ok && json_appendf(cursor, remaining, ",") && write_action_fields(cursor, remaining, &rule->actions[0]);
+    ok = ok && json_appendf(cursor, remaining, ",\"actions\":[");
+    for (size_t i = 0; i < rule->action_count && ok; ++i) {
+        ok = json_appendf(cursor, remaining, "%s{", i ? "," : "") &&
+             write_action_fields(cursor, remaining, &rule->actions[i]) && json_appendf(cursor, remaining, "}");
+    }
+    return ok && json_appendf(cursor, remaining, "]");
+}
+
 static bool write_config_json(const automation_config_t *config, char *out, size_t out_len)
 {
-    if (config == NULL || out == NULL || out_len == 0) {
-        return false;
-    }
-    const automation_rule_t *rule = config->rule_count > 0 ? &config->rules[0] : NULL;
-    const rule_action_t *action = (rule != NULL && rule->action_count > 0) ? &rule->actions[0] : NULL;
-    const rule_value_t threshold = rule != NULL ? rule->when.threshold : rule_value_bool(false);
-    const bool threshold_bool = threshold.kind == RULE_VALUE_BOOL && threshold.as.bool_value;
-    const int32_t threshold_i32 = threshold.kind == RULE_VALUE_I32 ? threshold.as.i32_value : 0;
-    const char *threshold_kind = threshold.kind == RULE_VALUE_I32 ? "i32" : "bool";
-    const char *auth_state = (action != NULL && action->http_bearer_token[0] != '\0') ? "masked" : "empty";
-    const rule_gpio_config_t empty_gpio = {.pin = RULE_GPIO_UNUSED_PIN, .profile = RULE_GPIO_PROFILE_NONE};
-    const rule_gpio_config_t *gpio = rule != NULL ? &rule->when.gpio : &empty_gpio;
+    if (config == NULL || out == NULL || out_len == 0) return false;
     char *cursor = out;
     size_t remaining = out_len;
+    bool ok = json_appendf(&cursor, &remaining, "{\"schema_version\":%lu,\"rule_count\":%u",
+              (unsigned long)config->schema_version, (unsigned)config->rule_count);
+    if (config->rule_count > 0) ok = ok && json_appendf(&cursor, &remaining, ",") && write_rule_fields(&cursor, &remaining, &config->rules[0], true);
+    ok = ok && json_appendf(&cursor, &remaining, ",\"rules\":[");
+    for (size_t i = 0; i < config->rule_count && ok; ++i) {
+        ok = json_appendf(&cursor, &remaining, "%s{", i ? "," : "") &&
+             write_rule_fields(&cursor, &remaining, &config->rules[i], false) && json_appendf(&cursor, &remaining, "}");
+    }
+    ok = ok && json_appendf(&cursor, &remaining, "]}");
+    if (!ok) out[0] = '\0';
+    return ok;
+}
 
-    bool ok = json_appendf(&cursor, &remaining,
-                           "{\"schema_version\":%lu,\"rule_count\":%u,"
-                           "\"enabled\":%s,\"name\":",
-                           (unsigned long)config->schema_version,
-                           (unsigned)config->rule_count,
-                           (rule != NULL && rule->enabled) ? "true" : "false") &&
-              json_append_string(&cursor, &remaining, rule != NULL ? rule->name : "") &&
-              json_appendf(&cursor, &remaining,
-                           ",\"source\":\"%s\",\"action\":\"%s\","
-                           "\"comparator\":\"%s\",\"threshold_kind\":\"%s\","
-                           "\"threshold_bool\":%s,\"threshold_i32\":%ld,"
-                           "\"cooldown_ms\":%lu,\"sustain_ms\":%lu,"
-                           "\"gpio_pin\":%d,\"gpio_profile\":\"%s\","
-                           "\"gpio_active_low\":%s,\"gpio_debounce_ms\":%lu,"
-                           "\"speaker_frequency_hz\":%lu,\"speaker_duration_ms\":%lu,"
-                           "\"speaker_volume_percent\":%u,\"action_timeout_ms\":%lu,\"http_url\":",
-                           rule != NULL ? rule_source_name(rule->when.source) : "invalid",
-                           action != NULL ? rule_action_name(action->type) : "invalid",
-                           rule != NULL ? comparator_name(rule->when.comparator) : "invalid",
-                           threshold_kind,
-                           threshold_bool ? "true" : "false",
-                           (long)threshold_i32,
-                           rule != NULL ? (unsigned long)rule->cooldown_ms : 0ul,
-                           rule != NULL ? (unsigned long)rule->when.sustain_ms : 0ul,
-                           gpio->pin,
-                           gpio_profile_name(gpio->profile),
-                           gpio->active_low ? "true" : "false",
-                           (unsigned long)gpio->debounce_ms,
-                           action != NULL ? (unsigned long)action->speaker_frequency_hz : 0ul,
-                           action != NULL ? (unsigned long)action->speaker_duration_ms : 0ul,
-                           action != NULL ? (unsigned)action->speaker_volume_percent : 0u,
-                           action != NULL ? (unsigned long)action->timeout_ms : 0ul) &&
-              json_append_string(&cursor, &remaining, action != NULL ? action->http_url : "") &&
-              json_appendf(&cursor, &remaining, ",\"http_bearer_token\":\"%s\",\"scope\":\"first_rule\"}", auth_state);
-    if (!ok) {
-        if (out_len > 0) {
-            out[0] = '\0';
+/* cJSON is pinned under vendor/cjson; parse complete documents and reject
+ * duplicate keys instead of searching arbitrary substrings for field names. */
+static bool json_tree_valid(const cJSON *node, unsigned depth, size_t *nodes)
+{
+    if (depth > 16 || ++*nodes > 1024) return false;
+    for (const cJSON *child = node->child; child != NULL; child = child->next) {
+        if (cJSON_IsObject(node)) for (const cJSON *previous = node->child; previous != child; previous = previous->next) {
+            if (strcmp(previous->string, child->string) == 0) return false;
         }
-        return false;
+        if (!json_tree_valid(child, depth + 1, nodes)) return false;
     }
     return true;
 }
 
-static bool json_value_boundary(char ch);
-
-static bool json_get_string(const char *body, const char *key, char *out, size_t out_len)
+/* Bound allocations before cJSON builds its tree, including ignored fields.
+ * This only counts lexical values; cJSON remains the syntax authority. */
+static bool json_node_budget_ok(const char *body)
 {
-    if (body == NULL || key == NULL || out == NULL || out_len == 0) {
-        return false;
-    }
-    char pattern[40];
-    int pattern_len = snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    if (pattern_len <= 0 || (size_t)pattern_len >= sizeof(pattern)) {
-        return false;
-    }
-    const char *pos = strstr(body, pattern);
-    if (pos == NULL) {
-        return false;
-    }
-    pos = strchr(pos + strlen(pattern), ':');
-    if (pos == NULL) {
-        return false;
-    }
-    pos++;
-    while (*pos == ' ' || *pos == '\t' || *pos == '\r' || *pos == '\n') {
-        pos++;
-    }
-    if (*pos != '\"') {
-        return false;
-    }
-    pos++;
-    size_t used = 0;
-    while (*pos != '\0' && *pos != '\"') {
-        char decoded = *pos++;
-        if (decoded == '\\') {
-            switch (*pos) {
-            case '\"':
-            case '\\':
-            case '/':
-                decoded = *pos++;
-                break;
-            case 'b':
-                decoded = '\b';
-                pos++;
-                break;
-            case 'f':
-                decoded = '\f';
-                pos++;
-                break;
-            case 'n':
-                decoded = '\n';
-                pos++;
-                break;
-            case 'r':
-                decoded = '\r';
-                pos++;
-                break;
-            case 't':
-                decoded = '\t';
-                pos++;
-                break;
-            case 'u': {
-                /* The exporter uses \u00XX for ASCII control characters.
-                 * Reject embedded NUL and unsupported unicode escapes. */
-                unsigned value = 0;
-                pos++;
-                for (size_t i = 0; i < 4; ++i) {
-                    const char digit = *pos++;
-                    unsigned nibble;
-                    if (digit >= '0' && digit <= '9') {
-                        nibble = (unsigned)(digit - '0');
-                    } else if (digit >= 'a' && digit <= 'f') {
-                        nibble = (unsigned)(digit - 'a') + 10u;
-                    } else if (digit >= 'A' && digit <= 'F') {
-                        nibble = (unsigned)(digit - 'A') + 10u;
-                    } else {
-                        return false;
-                    }
-                    value = value * 16u + nibble;
+    size_t nodes = 0;
+    bool primitive = false;
+    for (const char *p = body; *p != '\0'; ++p) {
+        if (*p == '"') {
+            ++p;
+            while (*p != '\0' && *p != '"') {
+                if (*p == '\\') {
+                    ++p;
+                    if (*p == '\0') return false;
                 }
-                if (value == 0 || value > 0x7fu) {
-                    return false;
-                }
-                decoded = (char)value;
-                break;
+                ++p;
             }
-            default:
-                return false;
-            }
+            if (*p == '\0') return false;
+            const char *next = p + 1;
+            while (*next == ' ' || *next == '\t' || *next == '\r' || *next == '\n') ++next;
+            if (*next != ':' && ++nodes > 1024) return false;
+            primitive = false;
+        } else if (*p == '{' || *p == '[') {
+            if (++nodes > 1024) return false;
+            primitive = false;
+        } else if (*p == ',' || *p == ':' || *p == '}' || *p == ']' ||
+                   *p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+            primitive = false;
+        } else if (!primitive) {
+            if (++nodes > 1024) return false;
+            primitive = true;
         }
-        if (used + 1u >= out_len) {
-            out[0] = '\0';
-            return false;
-        }
-        out[used++] = decoded;
     }
-    out[used] = '\0';
-    return *pos == '\"' && json_value_boundary(pos[1]);
+    return true;
 }
 
-static bool json_value_boundary(char ch)
+static cJSON *json_parse_object(const char *body)
 {
-    return ch == '\0' || ch == ',' || ch == '}' || ch == ']' ||
-           ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n';
+    if (body == NULL || strlen(body) >= RULE_WEB_MAX_BODY) return NULL;
+    if (!json_node_budget_ok(body)) return NULL;
+    /* cJSON uses C strings; a decoded NUL cannot be represented losslessly. */
+    for (const char *p = body; *p != '\0'; ++p) if (*p == '\\') {
+        ++p;
+        if (*p == '\0') return NULL;
+        if (strncmp(p, "u0000", 5) == 0) return NULL;
+    }
+    const char *end = NULL;
+    cJSON *root = cJSON_ParseWithLengthOpts(body, strlen(body) + 1, &end, true);
+    size_t nodes = 0;
+    if (root == NULL || !cJSON_IsObject(root) || !json_tree_valid(root, 0, &nodes)) {
+        cJSON_Delete(root);
+        return NULL;
+    }
+    return root;
+}
+
+static bool json_read_string(const cJSON *object, const char *key, char *out, size_t capacity)
+{
+    const cJSON *value = cJSON_GetObjectItemCaseSensitive(object, key);
+    if (value == NULL) return true;
+    if (!cJSON_IsString(value) || strlen(value->valuestring) >= capacity) return false;
+    memcpy(out, value->valuestring, strlen(value->valuestring) + 1);
+    return true;
+}
+
+static bool json_read_bool(const cJSON *object, const char *key, bool *out)
+{
+    const cJSON *value = cJSON_GetObjectItemCaseSensitive(object, key);
+    if (value == NULL) return true;
+    if (!cJSON_IsBool(value)) return false;
+    *out = cJSON_IsTrue(value);
+    return true;
+}
+
+static bool json_read_integer(const cJSON *object, const char *key, int64_t minimum, int64_t maximum, int64_t *out)
+{
+    const cJSON *value = cJSON_GetObjectItemCaseSensitive(object, key);
+    if (value == NULL) return true;
+    if (!cJSON_IsNumber(value) || !isfinite(value->valuedouble) ||
+        value->valuedouble < (double)minimum || value->valuedouble > (double)maximum) return false;
+    const int64_t n = (int64_t)value->valuedouble;
+    if ((double)n != value->valuedouble) return false;
+    *out = n;
+    return true;
+}
+
+static bool json_read_u32(const cJSON *object, const char *key, uint32_t *out)
+{
+    int64_t n = *out;
+    if (!json_read_integer(object, key, 0, UINT32_MAX, &n)) return false;
+    *out = (uint32_t)n;
+    return true;
+}
+
+static bool json_get_string(const char *body, const char *key, char *out, size_t capacity)
+{
+    cJSON *object = json_parse_object(body);
+    const bool ok = object != NULL && cJSON_GetObjectItemCaseSensitive(object, key) != NULL &&
+                    json_read_string(object, key, out, capacity);
+    cJSON_Delete(object);
+    return ok;
 }
 
 static bool json_get_bool(const char *body, const char *key, bool *out)
 {
-    if (body == NULL || key == NULL || out == NULL) {
-        return false;
-    }
-    char pattern[40];
-    (void)snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    const char *pos = strstr(body, pattern);
-    if (pos == NULL) {
-        return false;
-    }
-    pos = strchr(pos + strlen(pattern), ':');
-    if (pos == NULL) {
-        return false;
-    }
-    pos++;
-    while (*pos == ' ' || *pos == '\t' || *pos == '\r' || *pos == '\n') {
-        pos++;
-    }
-    if (strncmp(pos, "true", 4) == 0 && json_value_boundary(pos[4])) {
-        *out = true;
-        return true;
-    }
-    if (strncmp(pos, "false", 5) == 0 && json_value_boundary(pos[5])) {
-        *out = false;
-        return true;
-    }
-    return false;
+    cJSON *object = json_parse_object(body);
+    const bool ok = object != NULL && cJSON_GetObjectItemCaseSensitive(object, key) != NULL && json_read_bool(object, key, out);
+    cJSON_Delete(object);
+    return ok;
 }
-
 
 static bool json_get_i32(const char *body, const char *key, int32_t *out)
 {
-    if (body == NULL || key == NULL || out == NULL) {
-        return false;
-    }
-    char pattern[40];
-    int pattern_len = snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    if (pattern_len <= 0 || (size_t)pattern_len >= sizeof(pattern)) {
-        return false;
-    }
-    const char *pos = strstr(body, pattern);
-    if (pos == NULL) {
-        return false;
-    }
-    pos = strchr(pos + strlen(pattern), ':');
-    if (pos == NULL) {
-        return false;
-    }
-    pos++;
-    while (*pos == ' ' || *pos == '\t' || *pos == '\r' || *pos == '\n') {
-        pos++;
-    }
-    bool negative = false;
-    if (*pos == '-') {
-        negative = true;
-        pos++;
-    }
-    if (*pos < '0' || *pos > '9') {
-        return false;
-    }
-    int64_t value = 0;
-    const int64_t limit = negative ? 2147483648LL : 2147483647LL;
-    while (*pos >= '0' && *pos <= '9') {
-        value = (value * 10) + (*pos - '0');
-        if (value > limit) {
-            return false;
-        }
-        pos++;
-    }
-    if (!json_value_boundary(*pos)) {
-        return false;
-    }
-    *out = negative ? (int32_t)-value : (int32_t)value;
-    return true;
+    cJSON *object = json_parse_object(body);
+    int64_t n = 0;
+    const bool ok = object != NULL && cJSON_GetObjectItemCaseSensitive(object, key) != NULL &&
+                    json_read_integer(object, key, INT32_MIN, INT32_MAX, &n);
+    if (ok) *out = (int32_t)n;
+    cJSON_Delete(object);
+    return ok;
 }
 
 static bool gpio_profile_from_name(const char *name, rule_gpio_profile_t *profile)
@@ -711,117 +677,152 @@ static bool comparator_from_name(const char *name, rule_comparator_t *comparator
     return false;
 }
 
-static bool make_json_config(automation_config_t *config, const char *body)
+static bool parse_json_action(rule_action_t *action, const cJSON *object)
 {
-    if (config == NULL || body == NULL) {
-        return false;
+    char type[32];
+    (void)snprintf(type, sizeof(type), "%s", rule_action_name(action->type));
+    rule_action_type_t parsed;
+    if (!json_read_string(object, "action", type, sizeof(type)) || !action_from_name(type, &parsed)) return false;
+    if (parsed != action->type) {
+        memset(action, 0, sizeof(*action));
+        action->type = parsed;
+        action->timeout_ms = 100;
+        action->ir_carrier_hz = 38000;
+        action->speaker_frequency_hz = 7000;
+        action->speaker_duration_ms = 100;
+        action->speaker_volume_percent = 50;
     }
-    char source_name[48];
-    char action_name[32];
-    rule_source_t source;
-    rule_action_type_t action;
-    if (!json_get_string(body, "source", source_name, sizeof(source_name)) || !source_from_name(source_name, &source) ||
-        !json_get_string(body, "action", action_name, sizeof(action_name)) || !action_from_name(action_name, &action)) {
-        return false;
+    if (!json_read_string(object, "http_url", action->http_url, sizeof(action->http_url))) return false;
+    char token[RULE_HTTP_AUTH_MAX];
+    (void)snprintf(token, sizeof(token), "%s", action->http_bearer_token);
+    if (!json_read_string(object, "http_bearer_token", token, sizeof(token))) return false;
+    if (strcmp(token, "masked") == 0) {
+        if (action->http_bearer_token[0] == '\0') return false;
+    } else {
+        (void)snprintf(action->http_bearer_token, sizeof(action->http_bearer_token), "%s", strcmp(token, "empty") == 0 ? "" : token);
     }
+    if (!json_read_u32(object, "action_timeout_ms", &action->timeout_ms) ||
+        !json_read_u32(object, "speaker_frequency_hz", &action->speaker_frequency_hz) ||
+        !json_read_u32(object, "speaker_duration_ms", &action->speaker_duration_ms) ||
+        !json_read_u32(object, "ir_carrier_hz", &action->ir_carrier_hz)) return false;
+    int64_t n = action->speaker_volume_percent;
+    if (!json_read_integer(object, "speaker_volume_percent", 0, RULE_SPEAKER_MAX_VOLUME_PERCENT, &n)) return false;
+    action->speaker_volume_percent = (uint8_t)n;
+    n = action->ir_address;
+    if (!json_read_integer(object, "ir_address", 0, UINT16_MAX, &n)) return false;
+    action->ir_address = (uint16_t)n;
+    n = action->ir_command;
+    if (!json_read_integer(object, "ir_command", 0, UINT16_MAX, &n)) return false;
+    action->ir_command = (uint16_t)n;
+    n = action->ir_repeat_count;
+    if (!json_read_integer(object, "ir_repeat_count", 0, 5, &n)) return false;
+    action->ir_repeat_count = (uint8_t)n;
+    n = action->ir_protocol;
+    if (!json_read_integer(object, "ir_protocol", 0, RULE_IR_PROTOCOL_COUNT - 1, &n)) return false;
+    action->ir_protocol = (rule_ir_protocol_t)n;
+    return true;
+}
 
-    if (config->rule_count == 0) {
-        automation_config_set_defaults(config);
-    }
-    automation_rule_t *rule = &config->rules[0];
-    const bool source_changed = rule->when.source != source;
-    const bool action_changed = rule->actions[0].type != action;
-    bool enabled = rule->enabled;
-    (void)json_get_bool(body, "enabled", &enabled);
-    rule->enabled = enabled;
-    if (action_changed) {
-        memset(&rule->actions[0], 0, sizeof(rule->actions[0]));
-        rule->actions[0].type = action;
-        rule->actions[0].timeout_ms = 1000;
-    }
-    if (source_changed) {
+static bool parse_json_rule(automation_rule_t *rule, const cJSON *object)
+{
+    if (!cJSON_IsObject(object)) return false;
+    if (!json_read_bool(object, "enabled", &rule->enabled) || !json_read_u32(object, "id", &rule->id) ||
+        !json_read_string(object, "name", rule->name, sizeof(rule->name))) return false;
+    char source_name[48];
+    (void)snprintf(source_name, sizeof(source_name), "%s", rule_source_name(rule->when.source));
+    rule_source_t source;
+    if (!json_read_string(object, "source", source_name, sizeof(source_name)) || !source_from_name(source_name, &source)) return false;
+    if (source != rule->when.source) {
         memset(&rule->when, 0, sizeof(rule->when));
         rule->when.source = source;
+        rule->when.gpio.pin = RULE_GPIO_UNUSED_PIN;
+        rule->when.comparator = RULE_COMPARATOR_EQ;
+        rule->when.threshold = rule_value_bool(true);
         if (source == RULE_SOURCE_SOUND_RMS_DBFS || source == RULE_SOURCE_SOUND_PEAK_DBFS) {
             rule->when.comparator = RULE_COMPARATOR_GTE;
             rule->when.threshold = rule_value_i32(-20 * 256);
-        } else if (source == RULE_SOURCE_SOUND_CLIPPED) {
-            rule->when.comparator = RULE_COMPARATOR_EQ;
-            rule->when.threshold = rule_value_bool(true);
-        } else {
-            rule->when.comparator = RULE_COMPARATOR_EQ;
-            rule->when.threshold = rule_value_bool(true);
+        } else if (source == RULE_SOURCE_BATTERY_PERCENT || source == RULE_SOURCE_ADC_VOLTAGE_MV) {
+            rule->when.threshold = rule_value_i32(0);
         }
     }
-    char comparator_name_buf[16];
-    rule_comparator_t parsed_comparator;
-    if (json_get_string(body, "comparator", comparator_name_buf, sizeof(comparator_name_buf)) &&
-        comparator_from_name(comparator_name_buf, &parsed_comparator)) {
-        rule->when.comparator = parsed_comparator;
+    if (!json_read_string(object, "source_key", rule->when.source_key, sizeof(rule->when.source_key)) ||
+        !json_read_u32(object, "cooldown_ms", &rule->cooldown_ms) ||
+        !json_read_u32(object, "sustain_ms", &rule->when.sustain_ms)) return false;
+    char comparator[16];
+    (void)snprintf(comparator, sizeof(comparator), "%s", comparator_name(rule->when.comparator));
+    if (!json_read_string(object, "comparator", comparator, sizeof(comparator)) || !comparator_from_name(comparator, &rule->when.comparator)) return false;
+    char kind[8];
+    (void)snprintf(kind, sizeof(kind), "%s", rule->when.threshold.kind == RULE_VALUE_I32 ? "i32" : "bool");
+    if (!json_read_string(object, "threshold_kind", kind, sizeof(kind))) return false;
+    if (strcmp(kind, "i32") == 0) {
+        int64_t n = rule->when.threshold.kind == RULE_VALUE_I32 ? rule->when.threshold.as.i32_value : 0;
+        if (!json_read_integer(object, "threshold_i32", INT32_MIN, INT32_MAX, &n)) return false;
+        rule->when.threshold = rule_value_i32((int32_t)n);
+    } else if (strcmp(kind, "bool") == 0) {
+        bool value = rule->when.threshold.kind == RULE_VALUE_BOOL && rule->when.threshold.as.bool_value;
+        if (!json_read_bool(object, "threshold_bool", &value)) return false;
+        rule->when.threshold = rule_value_bool(value);
+    } else return false;
+    if (rule_source_is_gpio(source)) {
+        int64_t pin = rule->when.gpio.pin;
+        char profile[32];
+        (void)snprintf(profile, sizeof(profile), "%s", gpio_profile_name(rule->when.gpio.profile));
+        if (!json_read_integer(object, "gpio_pin", 0, 48, &pin) ||
+            !json_read_string(object, "gpio_profile", profile, sizeof(profile)) || !gpio_profile_from_name(profile, &rule->when.gpio.profile) ||
+            !json_read_bool(object, "gpio_active_low", &rule->when.gpio.active_low) ||
+            !json_read_u32(object, "gpio_debounce_ms", &rule->when.gpio.debounce_ms)) return false;
+        rule->when.gpio.pin = (int)pin;
+        (void)snprintf(rule->when.source_key, sizeof(rule->when.source_key), "%s.%d", rule_source_name(source), (int)pin);
     }
-    char threshold_kind[8];
-    int32_t threshold_i32 = 0;
-    bool threshold_bool = false;
-    if (json_get_string(body, "threshold_kind", threshold_kind, sizeof(threshold_kind)) &&
-        strcmp(threshold_kind, "i32") == 0 && json_get_i32(body, "threshold_i32", &threshold_i32)) {
-        rule->when.threshold = rule_value_i32(threshold_i32);
-    } else if (json_get_bool(body, "threshold_bool", &threshold_bool)) {
-        rule->when.threshold = rule_value_bool(threshold_bool);
-    }
-    int32_t cooldown_ms = 0;
-    if (json_get_i32(body, "cooldown_ms", &cooldown_ms) && cooldown_ms >= 0) {
-        rule->cooldown_ms = (uint32_t)cooldown_ms;
-    }
-    int32_t sustain_ms = 0;
-    if (json_get_i32(body, "sustain_ms", &sustain_ms) && sustain_ms >= 0) {
-        rule->when.sustain_ms = (uint32_t)sustain_ms;
-    }
-    char name[RULE_NAME_MAX];
-    if (json_get_string(body, "name", name, sizeof(name))) {
-        (void)snprintf(rule->name, sizeof(rule->name), "%s", name);
-    }
-    if (rule_source_is_gpio(source) && (source_changed || strstr(body, "\"gpio_pin\"") != NULL)) {
-        if (!json_get_gpio_config(body, &rule->when.gpio)) {
-            return false;
-        }
-        (void)snprintf(rule->when.source_key, sizeof(rule->when.source_key), "%s.%d",
-                       rule_source_name(source), rule->when.gpio.pin);
-    }
-    if (action == RULE_ACTION_SPEAKER_TONE) {
-        int32_t frequency_hz = action_changed ? 7000 : (int32_t)rule->actions[0].speaker_frequency_hz;
-        int32_t duration_ms = action_changed ? 100 : (int32_t)rule->actions[0].speaker_duration_ms;
-        int32_t volume_percent = action_changed ? 50 : rule->actions[0].speaker_volume_percent;
-        int32_t timeout_ms = action_changed ? 100 : (int32_t)rule->actions[0].timeout_ms;
-        (void)json_get_i32(body, "speaker_frequency_hz", &frequency_hz);
-        (void)json_get_i32(body, "speaker_duration_ms", &duration_ms);
-        (void)json_get_i32(body, "speaker_volume_percent", &volume_percent);
-        (void)json_get_i32(body, "action_timeout_ms", &timeout_ms);
-        if (volume_percent < 0 || volume_percent > (int32_t)RULE_SPEAKER_MAX_VOLUME_PERCENT) {
-            return false;
-        }
-        rule->actions[0].speaker_frequency_hz = frequency_hz > 0 ? (uint32_t)frequency_hz : 0u;
-        rule->actions[0].speaker_duration_ms = duration_ms > 0 ? (uint32_t)duration_ms : 0u;
-        rule->actions[0].speaker_volume_percent = volume_percent > 0 ? (uint8_t)volume_percent : 0u;
-        rule->actions[0].timeout_ms = timeout_ms > 0 ? (uint32_t)timeout_ms : 0u;
-    }
-    if (action == RULE_ACTION_HTTP_POST) {
-        char url[RULE_HTTP_URL_MAX];
-        if (json_get_string(body, "http_url", url, sizeof(url))) {
-            (void)snprintf(rule->actions[0].http_url, sizeof(rule->actions[0].http_url), "%s", url);
-        } else if (action_changed || strstr(body, "\"http_url\"") != NULL) {
-            return false;
-        }
-        char token[RULE_HTTP_AUTH_MAX];
-        if (json_get_string(body, "http_bearer_token", token, sizeof(token)) &&
-            strcmp(token, "masked") != 0 && strcmp(token, "empty") != 0) {
-            (void)snprintf(rule->actions[0].http_bearer_token, sizeof(rule->actions[0].http_bearer_token), "%s", token);
-        }
-    }
-    int32_t action_timeout_ms;
-    if (json_get_i32(body, "action_timeout_ms", &action_timeout_ms) && action_timeout_ms >= 0) {
-        rule->actions[0].timeout_ms = (uint32_t)action_timeout_ms;
-    }
+    const cJSON *actions = cJSON_GetObjectItemCaseSensitive(object, "actions");
+    if (actions != NULL) {
+        const int count = cJSON_GetArraySize(actions);
+        if (!cJSON_IsArray(actions) || count < 1 || count > (int)RULE_MAX_ACTIONS_PER_RULE) return false;
+        for (int i = 0; i < count; ++i) if (!cJSON_IsObject(cJSON_GetArrayItem(actions, i)) ||
+            !parse_json_action(&rule->actions[i], cJSON_GetArrayItem(actions, i))) return false;
+        rule->action_count = (size_t)count;
+    } else if (!parse_json_action(&rule->actions[0], object)) return false;
     return true;
+}
+
+static bool make_json_config(automation_config_t *config, const char *body, const automation_config_t *current)
+{
+    cJSON *root = json_parse_object(body);
+    if (root == NULL) return false;
+    bool ok = json_read_u32(root, "schema_version", &config->schema_version) && config->schema_version == RULE_CONFIG_SCHEMA_VERSION;
+    const cJSON *rules = cJSON_GetObjectItemCaseSensitive(root, "rules");
+    if (ok && rules != NULL) {
+        const int count = cJSON_GetArraySize(rules);
+        ok = cJSON_IsArray(rules) && count <= (int)RULE_MAX_RULES;
+        if (ok) {
+            memset(config->rules, 0, sizeof(config->rules));
+            config->rule_count = (size_t)count;
+            for (int i = 0; i < count && ok; ++i) {
+                const cJSON *object = cJSON_GetArrayItem(rules, i);
+                uint32_t id = (uint32_t)i + 1;
+                ok = cJSON_IsObject(object) && json_read_u32(object, "id", &id);
+                automation_rule_t *rule = &config->rules[i];
+                rule->id = id;
+                rule->when.source = RULE_SOURCE_KEY1_SHORT;
+                rule->when.threshold = rule_value_bool(true);
+                rule->when.comparator = RULE_COMPARATOR_EQ;
+                rule->cooldown_ms = 1000;
+                rule->action_count = 1;
+                rule->actions[0].type = RULE_ACTION_LOCAL_UI;
+                for (size_t j = 0; current != NULL && j < current->rule_count; ++j) if (current->rules[j].id == id) *rule = current->rules[j];
+                ok = ok && parse_json_rule(rule, object);
+            }
+        }
+    } else if (ok) {
+        ok = cJSON_GetObjectItemCaseSensitive(root, "source") != NULL && cJSON_GetObjectItemCaseSensitive(root, "action") != NULL;
+        if (config->rule_count == 0) {
+            automation_config_set_defaults(config);
+            config->rule_count = 1;
+        }
+        if (ok) ok = parse_json_rule(&config->rules[0], root);
+    }
+    cJSON_Delete(root);
+    return ok && automation_config_validate(config, NULL, 0);
 }
 
 static void make_preset_config(automation_config_t *config, const char *preset)
@@ -836,6 +837,7 @@ static void make_preset_config(automation_config_t *config, const char *preset)
     rule->actions[0].type = RULE_ACTION_LOCAL_UI;
     rule->actions[0].timeout_ms = 100;
     rule->cooldown_ms = 1000;
+    rule->when.sustain_ms = 0;
     rule->when.comparator = RULE_COMPARATOR_EQ;
     rule->when.threshold = rule_value_bool(true);
     if (strcmp(preset, "loud_sound_local_ui") == 0) {
@@ -859,18 +861,13 @@ static void make_preset_config(automation_config_t *config, const char *preset)
 
 static const char *config_preset_from_body(const char *body)
 {
-    if (body == NULL || body[0] == '\0' || strcmp(body, "defaults") == 0) {
-        return "defaults";
+    if (body == NULL || body[0] == '\0' || strcmp(body, "defaults") == 0) return "defaults";
+    static const char *presets[] = {"defaults", "loud_sound_local_ui", "sound_local_ui", "button_local_ui"};
+    char requested[32] = {0};
+    if (!json_get_string(body, "preset", requested, sizeof(requested))) {
+        (void)snprintf(requested, sizeof(requested), "%s", body);
     }
-    if (strcmp(body, "loud_sound_local_ui") == 0 || strstr(body, "loud_sound_local_ui") != NULL) {
-        return "loud_sound_local_ui";
-    }
-    if (strcmp(body, "sound_local_ui") == 0 || strstr(body, "sound_local_ui") != NULL) {
-        return "sound_local_ui";
-    }
-    if (strcmp(body, "button_local_ui") == 0 || strstr(body, "button_local_ui") != NULL) {
-        return "button_local_ui";
-    }
+    for (size_t i = 0; i < sizeof(presets) / sizeof(presets[0]); ++i) if (strcmp(requested, presets[i]) == 0) return presets[i];
     return NULL;
 }
 
@@ -881,7 +878,8 @@ static bool commit_web_config(const automation_config_t *config, void *ctx)
 
 static bool rule_web_handle_request_unlocked(rule_web_t *web, rule_web_method_t method, const char *path, const char *body, char *out, size_t out_len)
 {
-    if (web == NULL || path == NULL || out == NULL || out_len == 0 || !web->started) {
+    if (web == NULL || path == NULL || out == NULL || out_len == 0 || !web->started ||
+        (method == RULE_WEB_METHOD_POST && body != NULL && strlen(body) >= (strcmp(path, "/api/config") == 0 ? RULE_WEB_MAX_BODY : RULE_WEB_SMALL_BODY))) {
         return false;
     }
     if (method == RULE_WEB_METHOD_GET && strcmp(path, "/") == 0) {
@@ -963,13 +961,21 @@ static bool rule_web_handle_request_unlocked(rule_web_t *web, rule_web_method_t 
         (void)snprintf(ap_password, sizeof(ap_password), "%s", config.ap_password);
         ap_channel = config.ap_channel;
         if (body != NULL && body[0] != '\0') {
-            const bool body_has_ssid = json_get_string(body, "ssid", ap_ssid, sizeof(ap_ssid));
-            if (body_has_ssid && !json_get_string(body, "password", ap_password, sizeof(ap_password))) {
-                ap_password[0] = '\0';
-            } else if (!body_has_ssid) {
-                (void)json_get_string(body, "password", ap_password, sizeof(ap_password));
+            cJSON *object = json_parse_object(body);
+            const char *error = NULL;
+            int64_t channel = ap_channel;
+            if (object == NULL) error = "invalid_json";
+            else if (!json_read_string(object, "ssid", ap_ssid, sizeof(ap_ssid))) error = "invalid_ap_ssid";
+            else if (!json_read_string(object, "password", ap_password, sizeof(ap_password))) error = "invalid_ap_password";
+            else if (!json_read_integer(object, "channel", 1, 13, &channel)) error = "invalid_ap_channel";
+            if (object != NULL && cJSON_GetObjectItemCaseSensitive(object, "ssid") != NULL &&
+                cJSON_GetObjectItemCaseSensitive(object, "password") == NULL) ap_password[0] = '\0';
+            cJSON_Delete(object);
+            if (error != NULL) {
+                const int written = snprintf(out, out_len, "{\"ok\":false,\"error\":\"%s\"}", error);
+                return written > 0 && (size_t)written < out_len;
             }
-            (void)json_get_i32(body, "channel", &ap_channel);
+            ap_channel = (int32_t)channel;
         }
         const size_t ap_ssid_len = strlen(ap_ssid);
         const size_t ap_password_len = strlen(ap_password);
@@ -1031,16 +1037,16 @@ static bool rule_web_handle_request_unlocked(rule_web_t *web, rule_web_method_t 
         }
         *config = web->runtime->engine.config;
         const char *preset = config_preset_from_body(body);
-        bool accepted = true;
         if (preset != NULL) {
             make_preset_config(config, preset);
-        } else if (!make_json_config(config, body)) {
-            accepted = false;
-            const int written = snprintf(out, out_len, "{\"error\":\"unsupported config body\"}");
+        } else if (!make_json_config(config, body, &web->runtime->engine.config)) {
+            const int written = snprintf(out, out_len, "{\"error\":\"config rejected\"}");
             free(config);
             return written > 0 && (size_t)written < out_len;
         }
-        if (accepted && !rule_runtime_replace_config_with_commit(web->runtime, config, commit_web_config, web->store)) {
+        const bool saved = web->store->opened && rule_runtime_replace_config_with_commit(
+            web->runtime, config, commit_web_config, web->store);
+        if (!saved) {
             const int written = snprintf(out, out_len, "{\"error\":\"config rejected\"}");
             free(config);
             return written > 0 && (size_t)written < out_len;
@@ -1113,12 +1119,10 @@ static bool rule_web_handle_request_unlocked(rule_web_t *web, rule_web_method_t 
 bool rule_web_handle_request(rule_web_t *web, rule_web_method_t method, const char *path,
                              const char *body, char *out, size_t out_len)
 {
-    if (web == NULL || path == NULL || out == NULL || out_len == 0) {
-        return false;
-    }
-    if (method == RULE_WEB_METHOD_POST && body != NULL && strlen(body) >= RULE_WEB_MAX_BODY) {
-        const int written = snprintf(out, out_len, "{\"ok\":false,\"error\":\"body too large\"}");
-        return written > 0 && (size_t)written < out_len;
+    if (method == RULE_WEB_METHOD_POST && body != NULL && path != NULL && out != NULL &&
+        strlen(body) >= (strcmp(path, "/api/config") == 0 ? RULE_WEB_MAX_BODY : RULE_WEB_SMALL_BODY)) {
+        const int n = snprintf(out, out_len, "{\"ok\":false,\"error\":\"body too large\"}");
+        return n > 0 && (size_t)n < out_len;
     }
     const bool touches_runtime = path != NULL &&
         (strcmp(path, "/api/status") == 0 || strcmp(path, "/api/config") == 0 ||

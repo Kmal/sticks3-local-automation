@@ -29,16 +29,17 @@ prefix = r'''
 typedef void *SemaphoreHandle_t;
 typedef void *TaskHandle_t;
 typedef int BaseType_t;
-typedef struct { int dispatcher; } fake_runtime_t;
+typedef struct { int dispatcher, hardware_facts; } fake_runtime_t;
 static fake_runtime_t s_rule_runtime;
-static int s_rule_store, s_rule_config;
+static struct { bool opened; } s_rule_store = {true};
+static int s_rule_config;
 static bool s_rule_runtime_ready;
 static SemaphoreHandle_t s_rule_mutex;
 static TaskHandle_t s_rule_gpio_task, s_rule_network_task, s_rule_ble_task;
 static bool fail_mutex, fail_core;
 static int fail_task, task_calls, deleted_tasks, stopped_workers, core_calls;
-static bool rule_config_store_open(int *store) { return true; }
-static bool rule_config_store_load(int *store, int *config) { return true; }
+static bool rule_config_store_open(void *store) { return true; }
+static bool rule_config_store_load(void *store, int *config) { return true; }
 static void automation_config_set_defaults(int *config) {}
 static SemaphoreHandle_t xSemaphoreCreateMutex(void) { return fail_mutex ? NULL : (void *)1; }
 static int xSemaphoreTake(SemaphoreHandle_t mutex, int timeout) { assert(mutex); return 1; }
@@ -66,6 +67,7 @@ static BaseType_t xTaskCreate(void (*fn)(void *), const char *name, int stack, v
 }
 static void vTaskDelete(TaskHandle_t task) { assert(task); deleted_tasks++; }
 static void action_dispatcher_stop(int *dispatcher) { stopped_workers++; }
+static void hardware_fact_service_deinit(int *hardware) {}
 '''
 suffix = r'''
 static void reset(void) {

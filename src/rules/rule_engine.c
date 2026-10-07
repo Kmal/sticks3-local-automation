@@ -89,100 +89,101 @@ bool rule_engine_replace_config(rule_engine_t *engine, const automation_config_t
     return true;
 }
 
-size_t rule_engine_process_fact_with_sink(rule_engine_t *engine, const trigger_fact_t *fact,
-                                         rule_event_batch_sink_t sink, void *ctx)
+static bool source_is_pulse(rule_source_t source)
 {
-    if (engine == NULL || fact == NULL || sink == NULL) {
-        return 0;
-    }
-
-    size_t event_count = 0;
-    for (size_t i = 0; i < engine->config.rule_count; ++i) {
-        const automation_rule_t *rule = &engine->config.rules[i];
-        if (!rule->enabled || rule->when.source != fact->source || !source_key_matches(rule->when.source_key, fact->source_key)) {
-            continue;
-        }
-
-        /* Button facts are discrete events, not a latched level. Rearm each
-         * event while retaining the successful-fire timestamp for cooldown. */
-        if (fact->source == RULE_SOURCE_KEY1_SHORT || fact->source == RULE_SOURCE_KEY2_SHORT) {
-            engine->state[i].condition_true = false;
-            engine->state[i].fired_while_true = false;
-        }
-        const bool now_true = values_compare(fact->value, rule->when.comparator, rule->when.threshold);
-        if (!now_true) {
-            engine->state[i].condition_true = false;
-            engine->state[i].fired_while_true = false;
-            engine->state[i].satisfied_since_ms = 0;
-            continue;
-        }
-
-        if (!engine->state[i].condition_true) {
-            engine->state[i].condition_true = true;
-            engine->state[i].fired_while_true = false;
-            engine->state[i].satisfied_since_ms = fact->uptime_ms;
-        }
-
-        if ((uint32_t)(fact->uptime_ms - engine->state[i].satisfied_since_ms) < rule->when.sustain_ms) {
-            continue;
-        }
-        if (engine->state[i].fired_while_true) {
-            continue;
-        }
-        if (engine->state[i].has_last_fire &&
-            (uint32_t)(fact->uptime_ms - engine->state[i].last_fire_ms) < rule->cooldown_ms) {
-            continue;
-        }
-        rule_event_batch_t batch = {.event_count = rule->action_count};
-        for (size_t action_index = 0; action_index < rule->action_count; ++action_index) {
-            rule_event_t *event = &batch.events[action_index];
-            event->sequence = engine->next_event_sequence + (uint32_t)action_index;
-            event->uptime_ms = fact->uptime_ms;
-            event->rule_id = rule->id;
-            event->source = fact->source;
-            event->action = rule->actions[action_index].type;
-            event->action_config = rule->actions[action_index];
-            event->measured_value = fact->value;
-            event->fire_count = engine->state[i].fire_count + 1u;
-            (void)strncpy(event->rule_name, rule->name, sizeof(event->rule_name) - 1);
-        }
-        if (!sink(&batch, ctx)) {
-            continue;
-        }
-        engine->state[i].fired_while_true = true;
-        engine->state[i].has_last_fire = true;
-        engine->state[i].last_fire_ms = fact->uptime_ms;
-        engine->state[i].fire_count++;
-        engine->next_event_sequence += (uint32_t)batch.event_count;
-        event_count += batch.event_count;
-    }
-    return event_count;
+    return source == RULE_SOURCE_KEY1_SHORT || source == RULE_SOURCE_KEY2_SHORT || source == RULE_SOURCE_GPIO_EDGE;
 }
 
-typedef struct {
-    rule_event_t *events;
-    size_t capacity;
-    size_t count;
-} event_buffer_t;
+static size_t evaluate_rule(rule_engine_t *engine, size_t i, uint32_t now,
+                            rule_event_batch_sink_t sink, void *ctx)
+{
+    const automation_rule_t *rule = &engine->config.rules[i];
+    const bool pulse = source_is_pulse(rule->when.source);
+    if (!rule->enabled || (!engine->state[i].condition_true && !engine->state[i].pending_pulse) ||
+        engine->state[i].fired_while_true ||
+        (uint32_t)(now - engine->state[i].satisfied_since_ms) < rule->when.sustain_ms ||
+        (engine->state[i].has_last_fire && (uint32_t)(now - engine->state[i].last_fire_ms) < rule->cooldown_ms)) return 0;
 
-static bool buffer_event_batch(const rule_event_batch_t *batch, void *ctx)
+    rule_event_batch_t batch = {.event_count = rule->action_count};
+    for (size_t j = 0; j < rule->action_count; ++j) {
+        rule_event_t *event = &batch.events[j];
+        memset(event, 0, sizeof(*event));
+        event->sequence = engine->next_event_sequence + (uint32_t)j;
+        event->uptime_ms = now;
+        event->rule_id = rule->id;
+        event->source = rule->when.source;
+        event->action = rule->actions[j].type;
+        event->action_config = rule->actions[j];
+        event->measured_value = engine->state[i].last_value;
+        event->fire_count = engine->state[i].fire_count + 1;
+        (void)strncpy(event->rule_name, rule->name, sizeof(event->rule_name) - 1);
+    }
+    if (!sink(&batch, ctx)) return 0;
+    engine->next_event_sequence += (uint32_t)rule->action_count;
+    engine->state[i].fired_while_true = !pulse;
+    engine->state[i].condition_true = !pulse;
+    engine->state[i].pending_pulse = false;
+    engine->state[i].has_last_fire = true;
+    engine->state[i].last_fire_ms = now;
+    engine->state[i].fire_count++;
+    return rule->action_count;
+}
+
+size_t rule_engine_process_fact_to_sink(rule_engine_t *engine, const trigger_fact_t *fact,
+                                      rule_event_batch_sink_t sink, void *ctx)
+{
+    if (engine == NULL || fact == NULL || sink == NULL) return 0;
+    size_t count = 0;
+    for (size_t i = 0; i < engine->config.rule_count; ++i) {
+        const automation_rule_t *rule = &engine->config.rules[i];
+        if (!rule->enabled || rule->when.source != fact->source || !source_key_matches(rule->when.source_key, fact->source_key)) continue;
+        const bool pulse = source_is_pulse(fact->source);
+        const bool now_true = values_compare(fact->value, rule->when.comparator, rule->when.threshold);
+        if (!now_true) {
+            if (pulse) continue;
+            engine->state[i].condition_true = false;
+            engine->state[i].fired_while_true = false;
+            engine->state[i].pending_pulse = false;
+            continue;
+        }
+        if (pulse && engine->state[i].has_last_fire &&
+            (uint32_t)(fact->uptime_ms - engine->state[i].last_fire_ms) < rule->cooldown_ms) continue;
+        if (pulse || !engine->state[i].condition_true) {
+            engine->state[i].satisfied_since_ms = fact->uptime_ms;
+            engine->state[i].fired_while_true = false;
+        }
+        engine->state[i].condition_true = true;
+        engine->state[i].pending_pulse = pulse;
+        engine->state[i].last_value = fact->value;
+        count += evaluate_rule(engine, i, fact->uptime_ms, sink, ctx);
+    }
+    return count;
+}
+
+size_t rule_engine_tick_to_sink(rule_engine_t *engine, uint32_t uptime_ms, rule_event_batch_sink_t sink, void *ctx)
+{
+    if (engine == NULL || sink == NULL) return 0;
+    size_t count = 0;
+    for (size_t i = 0; i < engine->config.rule_count; ++i) count += evaluate_rule(engine, i, uptime_ms, sink, ctx);
+    return count;
+}
+
+typedef struct { rule_event_t *events; size_t capacity; size_t used; } event_buffer_t;
+static bool append_event_batch(const rule_event_batch_t *batch, void *ctx)
 {
     event_buffer_t *buffer = ctx;
-    if (batch->event_count > buffer->capacity - buffer->count) {
-        return false;
-    }
-    memcpy(&buffer->events[buffer->count], batch->events, batch->event_count * sizeof(batch->events[0]));
-    buffer->count += batch->event_count;
+    const size_t count = batch->event_count;
+    if (count > buffer->capacity - buffer->used) return false;
+    memcpy(buffer->events + buffer->used, batch->events, count * sizeof(batch->events[0]));
+    buffer->used += count;
     return true;
 }
 
 size_t rule_engine_process_fact(rule_engine_t *engine, const trigger_fact_t *fact, rule_event_t *events, size_t max_events)
 {
-    if (events == NULL || max_events == 0) {
-        return 0;
-    }
+    if (events == NULL || max_events == 0) return 0;
     event_buffer_t buffer = {.events = events, .capacity = max_events};
-    return rule_engine_process_fact_with_sink(engine, fact, buffer_event_batch, &buffer);
+    return rule_engine_process_fact_to_sink(engine, fact, append_event_batch, &buffer);
 }
 
 const automation_rule_t *rule_engine_get_rule_by_id(const rule_engine_t *engine, uint32_t rule_id)
@@ -196,4 +197,9 @@ const automation_rule_t *rule_engine_get_rule_by_id(const rule_engine_t *engine,
         }
     }
     return NULL;
+}
+
+size_t rule_engine_process_fact_with_sink(rule_engine_t *engine, const trigger_fact_t *fact, rule_event_batch_sink_t sink, void *ctx)
+{
+    return rule_engine_process_fact_to_sink(engine, fact, sink, ctx);
 }
