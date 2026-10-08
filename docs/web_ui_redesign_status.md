@@ -4,7 +4,7 @@ This file records the code-review status of the phased Web UI redesign so review
 
 ## Current shipped scope
 
-The current implementation is a **Phase 0 + Phase 1 foundation only**:
+The current implementation is a **resource-bounded automation workspace with two section routes**:
 
 - Resource budgets are documented and statically checked.
 - The previous monolithic `s_rule_setup_page` C string has been extracted into `webui/` source files.
@@ -12,7 +12,13 @@ The current implementation is a **Phase 0 + Phase 1 foundation only**:
 - The firmware serves `GET /` from the generated const asset without allocating the large API response buffer used by JSON routes.
 - The configuration API imports/exports all rules and actions with masked credentials; flat form edits preserve other settings, and presets remain explicit replacements.
 - The HTTP server lifecycle is on-demand: disabled after boot, enabled only by Web UI Wi-Fi/AP entry flows once connected, and stopped when the user exits the Web UI result/URL screens.
-- Short browser input/select fields are center-aligned for phone readability; larger textarea/status surfaces stay left-aligned.
+- Responsive dark surfaces, mint accents, visible keyboard focus, and mobile navigation replace the long stacked form. Short inputs remain centered; JSON and logs remain left-aligned.
+- Automations is the default workspace: saved rules appear as entries, New automation opens a separate dialog, and selecting an entry edits that rule. The editor updates its first action while preserving additional actions and other rules.
+- Automations and Settings use client-side hash routes without adding HTTP handlers. On mobile, a Menu button opens an off-canvas navigation drawer with a 240 ms slide-in/slide-out transition and fading backdrop (disabled for reduced motion); choosing a section closes it. Close, Escape, and outside taps also dismiss it. Mobile uses a compact icon header (hamburger and refresh), with an automation lightning icon, the same hamburger icon to dismiss the drawer, and a single footer row containing plain connection status and a lock icon. The logo and both sidebar toggles use 24 px SVG artwork and 44 px touch targets; their top edges align in the open and closed mobile layouts. Text labels remain available to assistive technology. Desktop retains the sidebar. Settings groups network, time, backup, and diagnostics in expandable sections.
+- The flash asset is reproducible gzip, served directly with no firmware decompression or page-sized RAM buffer.
+- Pairing gates controls and API traffic; browser Lock clears the code, and HTTP 401 restores pairing.
+- Views load on demand, with no polling. Advanced GPIO settings, capabilities, raw status, and last-operation logs use progressive disclosure.
+- The main list uses a credential-free metadata response within the ordinary 2 KiB buffer. Full configuration is fetched only for editing, creation, or explicit backup operations.
 - Host validation checks generated-asset freshness and Web UI size budgets before running host tests.
 
 ## Phase checklist
@@ -21,21 +27,21 @@ The current implementation is a **Phase 0 + Phase 1 foundation only**:
 | --- | --- | --- |
 | Phase 0 — hard resource budgets | Complete for initial budgets | `docs/web_ui_resource_budget.md` documents current HTTP/body/response/route/stack values, accepted budgets, and measured Phase 1 asset sizes. |
 | Phase 1 — extract current Web UI | Complete for single-document mode | The UI remains behavior-equivalent and is emitted as one generated HTML asset because the route table already uses the 17 configured URI-handler slots. |
-| Phase 2 — modern visual system | Not started | No redesigned dark console layout or component vocabulary beyond the existing compact page. |
-| Phase 3 — hash router | Not started | No `/#dashboard`, `/#network`, or section router exists yet. |
-| Phase 4 — Dashboard command center | Not started | Current page still shows the legacy compact setup/status layout. |
-| Phase 5 — guided Network provisioning | Not started | Existing Wi-Fi controls remain; no stepper-style guided redesign yet. |
-| Phase 6 — Automation workspace | Not started | Current UI remains single-rule oriented and does not yet implement a multi-rule workspace. |
-| Phase 7 — first-class Capabilities page | Not started | Capabilities remain exposed in existing controls/raw panels only. |
-| Phase 8 — Diagnostics redesign | Not started | Raw developer tools have not been moved into a dedicated diagnostics page. |
-| Phase 9 — Settings/security posture | Not started | Future auth/pairing hooks and security copy are not implemented yet. |
-| Phase 10 — resource-safe full config backend | Not started | `/api/config/op` and bounded mutation operations are not implemented yet. |
-| Phase 11 — performance/failure testing | Partial static only | Static asset and host checks exist; real StickS3 heap/hardware validation is still required. |
+| Phase 2 — modern visual system | Complete | Responsive dark console, mint accents, clear forms, focus states, and mobile navigation. |
+| Phase 3 — hash router | Complete for current scope | `/#automations` and `/#settings`; no additional server asset routes. |
+| Phase 4 — Dashboard command center | Superseded by automation workspace | Saved automations are the default working surface, per the product direction. |
+| Phase 5 — guided Network provisioning | Partial | Scan/select/connect, saved credentials, and hotspot controls are reorganized. No stepper or new provisioning API. |
+| Phase 6 — Automation workspace | Complete for list/create/edit scope | All saved rules listed; separate WHEN/DO dialog creates or edits a selected rule. Conditional HTTP/GPIO controls; additional actions and other settings preserved. Editing multiple actions remains future work. |
+| Phase 7 — first-class Capabilities page | Partial | HAT probing and expandable capability JSON live in Settings diagnostics. |
+| Phase 8 — Diagnostics redesign | Complete for existing controls | Expandable Settings diagnostics; raw JSON and operation details collapsed by default. |
+| Phase 9 — Settings/security posture | Partial | Network, time, backup, and diagnostics in Settings; existing code pairing, browser Lock, 401 handling, masked tokens, and destructive-action confirmations. No new firmware security protocol. |
+| Phase 10 — resource-safe full config backend | Partial | `/api/config?view=list` adds a bounded metadata read using the existing handler and 2 KiB response buffer. Saves still use complete snapshots; `/api/config/op` and bounded mutation operations are not implemented. |
+| Phase 11 — performance/failure testing | Partial, hardware pending | Asset round trips, JS/host regressions, browser API-fixture interactions and responsive checks, and default ESP32-S3 build. Real-device peak heap and hardware checks remain required. |
 
 ## Review outcome
 
-The extraction preserved API behavior. The subsequent correctness patch fixes config preservation, raises the bounded request cap to 32,768 bytes for snapshot round trips, removes redundant nested summaries, and adds safe SSID rendering. The remaining risk areas before later phases are:
+The redesign preserves firmware API behavior, server lifecycle, handler count, stack size, and all existing controls. The subsequent correctness patch fixes config preservation, raises the bounded request cap to 32,768 bytes for snapshot round trips, removes redundant nested summaries, and adds safe SSID rendering. The remaining risk areas before later phases are:
 
 1. Hardware measurement is still required for true peak heap impact.
-2. The UI source files are extracted but still compact because Phase 1 preserved behavior rather than redesigning.
+2. Browser interaction validation uses mocked device responses; physical Wi-Fi transitions and hardware actions require a StickS3.
 3. Future phases must keep `tools/check_web_ui_budget.py` and this status document updated when adding routes, assets, polling, or backend APIs.

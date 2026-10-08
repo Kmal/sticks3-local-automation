@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import gzip
+import io
 import re
 from pathlib import Path
 
@@ -62,7 +64,16 @@ def render_outputs(data: bytes) -> tuple[str, str]:
         "extern const unsigned char webui_index_html[];\n"
         "extern const unsigned int webui_index_html_len;\n"
     )
-    source = "#include \"webui_assets.h\"\n\n" + c_bytes("webui_index_html", data)
+    # Compress at build time; the browser decompresses, never the ESP32.
+    # GzipFile fixes the timestamp, filename, and OS byte for reproducible assets.
+    packed = io.BytesIO()
+    with gzip.GzipFile(fileobj=packed, mode="wb", filename="", mtime=0) as stream:
+        stream.write(data)
+    source = (
+        "#include \"webui_assets.h\"\n\n#ifdef ESP_PLATFORM\n"
+        + c_bytes("webui_index_html", packed.getvalue())
+        + "#else\n" + c_bytes("webui_index_html", data) + "#endif\n"
+    )
     return header, source
 
 
