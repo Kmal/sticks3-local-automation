@@ -19,6 +19,8 @@ MAX_URI_HANDLERS = 17
 STACK_SIZE = 8192
 ROM_TARGET = 32 * KI_B
 ROM_CEILING = 64 * KI_B
+GZIP_CEILING = 16 * KI_B
+DOCUMENT_CEILING = 32 * KI_B - 1
 HTML_SHELL_CEILING = 8 * KI_B
 CSS_SOURCE_CEILING = 12 * KI_B
 JS_SOURCE_CEILING = 25 * KI_B
@@ -86,8 +88,13 @@ def main() -> int:
             asset_len = int(match.group(1))
             if asset_len > ROM_CEILING:
                 errors.append(f"generated Web UI asset {asset_len} bytes exceeds hard ROM ceiling {ROM_CEILING}")
-            if asset_len > MAX_RESPONSE:
-                errors.append(f"generated Web UI asset {asset_len} bytes exceeds host response buffer {MAX_RESPONSE}")
+            if asset_len > GZIP_CEILING:
+                errors.append(f"compressed page {asset_len} bytes exceeds single-document budget {GZIP_CEILING}")
+            lengths = [int(n) for n in re.findall(r"webui_index_html_len\s*=\s*(\d+)u", generated)]
+            if len(lengths) != 2:
+                errors.append("expected compressed firmware and plain host-test assets")
+            elif lengths[1] > DOCUMENT_CEILING:
+                errors.append(f"decoded document {lengths[1]} bytes exceeds host response budget {DOCUMENT_CEILING}")
 
     if errors:
         print("Web UI budget validation failed:", file=sys.stderr)

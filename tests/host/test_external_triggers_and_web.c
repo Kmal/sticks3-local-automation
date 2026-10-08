@@ -109,27 +109,28 @@ static void test_rule_web_status(void)
     ASSERT_TRUE(strstr(json, "\"wifi\"") != NULL);
     ASSERT_TRUE(strstr(json, "\"sound\"") != NULL);
     ASSERT_TRUE(strstr(json, "audio_capture_disabled") != NULL);
-    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_GET, "/", NULL, json, sizeof(json)));
-    ASSERT_TRUE(strstr(json, "Trigger source") != NULL);
-    ASSERT_TRUE(strstr(json, "Import / export JSON") != NULL);
-    ASSERT_TRUE(strstr(json, "Test GPIO safety") != NULL);
-    ASSERT_TRUE(strstr(json, "Probe HAT") != NULL);
-    ASSERT_TRUE(strstr(json, "Wi-Fi Mode") != NULL);
-    ASSERT_TRUE(strstr(json, "AP Mode") != NULL);
-    ASSERT_TRUE(strstr(json, "AP Name") != NULL);
-    ASSERT_TRUE(strstr(json, "Scan Nearby Wi-Fi") != NULL);
-    ASSERT_TRUE(strstr(json, "Use Wi-Fi Mode") != NULL);
-    ASSERT_TRUE(strstr(json, "Use AP Mode") != NULL);
-    ASSERT_TRUE(strstr(json, "Saved Wi-Fi") != NULL);
-    ASSERT_TRUE(strstr(json, "Time settings") != NULL);
-    ASSERT_TRUE(strstr(json, "Save Timezone") != NULL);
-    ASSERT_TRUE(strstr(json, "<select id=\"timezone\">") != NULL);
-    ASSERT_TRUE(strstr(json, "Pacific Time (UTC-8)") != NULL);
-    ASSERT_TRUE(strstr(json, "India (UTC+5:30)") != NULL);
-    ASSERT_TRUE(strstr(json, "Forget Saved Credentials") != NULL);
-    ASSERT_TRUE(strstr(json, "id=\"wifi_ssid\" maxlength=\"32\" autocomplete=\"off\" autocapitalize=\"none\"") != NULL);
-    ASSERT_TRUE(strstr(json, "id=\"wifi_password\" type=\"password\" maxlength=\"63\" autocomplete=\"off\" autocapitalize=\"none\"") != NULL);
-    ASSERT_TRUE(strstr(json, "id=\"ap_ssid\" maxlength=\"32\" autocomplete=\"off\" autocapitalize=\"none\"") != NULL);
+    char page[32768]; /* Plain HTML host fixture; ESP serves gzip directly from flash. */
+    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_GET, "/", NULL, page, sizeof(page)));
+    ASSERT_TRUE(strstr(page, "Trigger source") != NULL);
+    ASSERT_TRUE(strstr(page, "Configuration backup") != NULL);
+    ASSERT_TRUE(strstr(page, "Test GPIO safety") != NULL);
+    ASSERT_TRUE(strstr(page, "Probe HAT") != NULL);
+    ASSERT_TRUE(strstr(page, "Wi-Fi mode") != NULL);
+    ASSERT_TRUE(strstr(page, "AP mode") != NULL);
+    ASSERT_TRUE(strstr(page, "Hotspot name") != NULL);
+    ASSERT_TRUE(strstr(page, "Scan Wi-Fi") != NULL);
+    ASSERT_TRUE(strstr(page, "Use Wi-Fi mode") != NULL);
+    ASSERT_TRUE(strstr(page, "Use AP mode") != NULL);
+    ASSERT_TRUE(strstr(page, "SAVED NETWORK") != NULL);
+    ASSERT_TRUE(strstr(page, "Device time") != NULL);
+    ASSERT_TRUE(strstr(page, "Save timezone") != NULL);
+    ASSERT_TRUE(strstr(page, "<select id=\"timezone\">") != NULL);
+    ASSERT_TRUE(strstr(page, "UTC-8") != NULL);
+    ASSERT_TRUE(strstr(page, "UTC+5:30") != NULL);
+    ASSERT_TRUE(strstr(page, "Forget network") != NULL);
+    ASSERT_TRUE(strstr(page, "id=\"wifi_ssid\" maxlength=\"32\" autocapitalize=\"none\"") != NULL);
+    ASSERT_TRUE(strstr(page, "id=\"wifi_password\" type=\"password\" autocomplete=\"off\" maxlength=\"63\"") != NULL);
+    ASSERT_TRUE(strstr(page, "id=\"ap_ssid\" maxlength=\"32\" autocapitalize=\"none\"") != NULL);
     ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_GET, "/api/time", NULL, json, sizeof(json)));
     ASSERT_EQ_U32(1, s_runtime_lock_count);
     ASSERT_TRUE(strstr(json, "\"timezone\":\"UTC\"") != NULL);
@@ -735,8 +736,48 @@ static void test_session_authorization_and_small_config_ack(void)
     rule_config_store_close(&store);
 }
 
+static void test_rule_list_fits_small_response_and_hides_secrets(void)
+{
+    automation_config_t config; automation_config_set_defaults(&config);
+    config.rule_count = RULE_MAX_RULES;
+    for (size_t i = 0; i < RULE_MAX_RULES; ++i) {
+        if (i != 0) config.rules[i] = config.rules[0];
+        config.rules[i].id = UINT32_MAX - (uint32_t)i;
+        config.rules[i].action_count = RULE_MAX_ACTIONS_PER_RULE;
+        for (size_t j = 0; j < RULE_MAX_ACTIONS_PER_RULE; ++j) {
+            config.rules[i].actions[j] = config.rules[0].actions[0];
+            strcpy(config.rules[i].actions[j].http_bearer_token, "test-secret-do-not-list");
+        }
+    }
+    rule_runtime_t runtime; rule_config_store_t store; rule_web_t web;
+    ASSERT_TRUE(rule_runtime_init(&runtime, &config));
+    ASSERT_TRUE(rule_config_store_open(&store));
+    ASSERT_TRUE(rule_web_start(&web, &runtime, &store));
+    rule_web_set_runtime_lock(&web, capture_runtime_lock, capture_runtime_unlock, NULL);
+    s_runtime_lock_count = s_runtime_unlock_count = 0;
+    const char names[] = {'\\', '"', '\x01'};
+    for (size_t n = 0; n < sizeof(names); ++n) {
+        for (size_t i = 0; i < RULE_MAX_RULES; ++i) {
+            memset(runtime.engine.config.rules[i].name, names[n], RULE_NAME_MAX - 1);
+            runtime.engine.config.rules[i].name[RULE_NAME_MAX - 1] = '\0';
+        }
+        char list[2048];
+        ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_GET, "/api/config?view=list", NULL, list, sizeof(list)));
+        ASSERT_TRUE(strlen(list) < sizeof(list));
+        ASSERT_TRUE(strstr(list, "test-secret") == NULL);
+        ASSERT_TRUE(strstr(list, "http_bearer_token") == NULL);
+        ASSERT_TRUE(strstr(list, "http_url") == NULL);
+        ASSERT_TRUE(strstr(list, "\"action_count\":3") != NULL);
+        ASSERT_TRUE(strstr(list, "4294967295") != NULL);
+    }
+    ASSERT_EQ_U32(3, s_runtime_lock_count);
+    ASSERT_EQ_U32(3, s_runtime_unlock_count);
+    rule_web_stop(&web); rule_config_store_close(&store);
+}
+
 int main(void)
 {
+    test_rule_list_fits_small_response_and_hides_secrets();
     test_first_action_contract_and_rejection_sequence();
     test_session_authorization_and_small_config_ack();
     test_strict_config_parsing_preserves_runtime_and_store();

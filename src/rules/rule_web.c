@@ -30,7 +30,9 @@ static esp_err_t rule_web_http_handler(httpd_req_t *req)
 {
     rule_web_t *web = (rule_web_t *)req->user_ctx;
     if (req->method == HTTP_GET && strcmp(req->uri, "/") == 0) {
-        httpd_resp_set_type(req, "text/html");
+        httpd_resp_set_type(req, "text/html; charset=utf-8");
+        httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
         return httpd_resp_send(req, (const char *)webui_index_html, (ssize_t)webui_index_html_len) == ESP_OK ? ESP_OK : ESP_FAIL;
     }
 
@@ -495,6 +497,30 @@ static bool write_config_json(const automation_config_t *config, char *out, size
     for (size_t i = 0; i < config->rule_count && ok; ++i) {
         ok = json_appendf(&cursor, &remaining, "%s{", i ? "," : "") &&
              write_rule_fields(&cursor, &remaining, &config->rules[i], false) && json_appendf(&cursor, &remaining, "}");
+    }
+    ok = ok && json_appendf(&cursor, &remaining, "]}");
+    if (!ok) out[0] = '\0';
+    return ok;
+}
+
+/* List metadata fits the existing ordinary 2 KiB response allocation. */
+static bool write_rule_list_json(const automation_config_t *config, char *out, size_t out_len)
+{
+    char *cursor = out;
+    size_t remaining = out_len;
+    bool ok = json_appendf(&cursor, &remaining, "{\"schema_version\":%lu,\"rules\":[", (unsigned long)config->schema_version);
+    for (size_t i = 0; i < config->rule_count && ok; ++i) {
+        const automation_rule_t *rule = &config->rules[i];
+        char name[RULE_NAME_MAX];
+        memcpy(name, rule->name, sizeof(name));
+        name[sizeof(name) - 1] = '\0';
+        /* Display controls as spaces; full export retains the original name. */
+        for (size_t j = 0; name[j] != '\0'; ++j) if ((unsigned char)name[j] < 0x20 || name[j] == 0x7f) name[j] = ' ';
+        ok = json_appendf(&cursor, &remaining, "%s{\"id\":%lu,\"name\":", i ? "," : "", (unsigned long)rule->id) &&
+             json_append_string(&cursor, &remaining, name) &&
+             json_appendf(&cursor, &remaining, ",\"enabled\":%s,\"source\":\"%s\",\"action_count\":%u,\"actions\":[{\"action\":\"%s\"}]}",
+                          rule->enabled ? "true" : "false", rule_source_name(rule->when.source),
+                          (unsigned)rule->action_count, rule_action_name(rule->actions[0].type));
     }
     ok = ok && json_appendf(&cursor, &remaining, "]}");
     if (!ok) out[0] = '\0';
@@ -1181,6 +1207,9 @@ static bool rule_web_handle_request_unlocked(rule_web_t *web, rule_web_method_t 
     if (method == RULE_WEB_METHOD_GET && strcmp(path, "/api/config") == 0) {
         return write_config_json(&web->runtime->engine.config, out, out_len);
     }
+    if (method == RULE_WEB_METHOD_GET && strcmp(path, "/api/config?view=list") == 0) {
+        return write_rule_list_json(&web->runtime->engine.config, out, out_len);
+    }
     if (method == RULE_WEB_METHOD_POST && strcmp(path, "/api/config") == 0) {
         automation_config_t *config = calloc(1, sizeof(*config));
         if (config == NULL) {
@@ -1281,7 +1310,7 @@ bool rule_web_handle_request(rule_web_t *web, rule_web_method_t method, const ch
         return n > 0 && (size_t)n < out_len;
     }
     const bool touches_runtime = path != NULL &&
-        (strcmp(path, "/api/status") == 0 || strcmp(path, "/api/config") == 0 ||
+        (strcmp(path, "/api/status") == 0 || strcmp(path, "/api/config") == 0 || strcmp(path, "/api/config?view=list") == 0 ||
          strcmp(path, "/api/rules/test") == 0);
     if (touches_runtime && (web == NULL || !rule_web_lock_runtime(web))) {
         return false;

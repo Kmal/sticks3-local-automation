@@ -13,7 +13,7 @@ These values are intentionally documented before feature work so later changes a
 | `httpd_config_t.max_uri_handlers` | 17 | `rule_web_start()` |
 | `httpd_config_t.stack_size` | 8,192 bytes | `rule_web_start()` |
 
-The current route table already consumes the 17 registered URI-handler slots, so Phase 1 ships as a single generated HTML document instead of adding CSS/JS asset routes. The HTTP server is not a boot-time resident service: the LCD Web UI Wi-Fi/AP entry flows start it only after network connectivity is available, and backing out of the Web UI result/URL screens stops it so the HTTP server task, stack, handler table, and heap allocations are released.
+The current route table consumes the 17 registered URI-handler slots. The redesigned UI remains a single generated HTML document, with CSS and JavaScript inlined. At build time Python gzip compresses the document. ESP-IDF compiles only the compressed const array; host tests compile the plain fixture. The root handler sends the gzip bytes directly from flash with `Content-Encoding: gzip`; decompression happens in the browser. The HTTP server is not a boot-time resident service: the LCD Web UI Wi-Fi/AP entry flows start it only after network connectivity is available, and backing out of the Web UI result/URL screens stops it so the HTTP server task, stack, handler table, and heap allocations are released.
 
 ### Internal RAM for deferred HTTP startup
 
@@ -30,7 +30,8 @@ Existing `sdkconfig` files retain their previous values when defaults change. Fo
 | Budget | Target | Hard ceiling | Enforcement |
 | --- | ---: | ---: | --- |
 | Added firmware ROM for generated Web UI assets | < 32 KiB | 64 KiB | `tools/check_web_ui_budget.py` |
-| Generated single-document asset | Fit in existing response cap for host tests | 16,384 bytes | `tools/check_web_ui_budget.py` |
+| Compressed single-document flash asset | < 8 KiB | 16,384 bytes | `tools/check_web_ui_budget.py` |
+| Decoded HTML / plain host fixture | Fit in existing 32 KiB response cap | 32,767 bytes | `tools/check_web_ui_budget.py` |
 | Initial HTML shell source after minification, excluding inlined CSS/JS | < 8 KiB | 8 KiB | `tools/check_web_ui_budget.py` |
 | CSS source before minification | < 12 KiB | 12 KiB | `tools/check_web_ui_budget.py` |
 | JavaScript source before minification | < 25 KiB | 25 KiB | `tools/check_web_ui_budget.py` |
@@ -41,19 +42,30 @@ Existing `sdkconfig` files retain their previous values when defaults change. Fo
 | Persistent background polling | no faster than 1 second | 1 second minimum interval | code review |
 
 
-## Current Phase 1 measurements
+## Current redesign measurements
 
-Measured by `webui/build_webui.py --check` and `tools/check_web_ui_budget.py` for the extracted, behavior-equivalent single-document UI:
+Measured by `webui/build_webui.py --check`, `tools/check_web_ui_budget.py`, and compiled asset round-trip tests:
 
 | Measurement | Current value | Budget status |
 | --- | ---: | --- |
-| Generated `webui_index_html` asset | 15,855 bytes | Under 32 KiB target |
-| Minified HTML shell source, excluding injected CSS/JS | 6,516 bytes | Under 8 KiB hard ceiling |
-| CSS source before minification | 1,921 bytes | Under 12 KiB hard ceiling |
-| JavaScript source before minification | 7,653 bytes | Under 25 KiB hard ceiling |
+| Firmware gzip `webui_index_html` payload | 9,917 bytes | Above 8 KiB target, within 16 KiB ceiling; 37.4% smaller than the prior 15,855-byte page |
+| Decoded HTML / host fixture | 32,754 bytes | Under existing 32 KiB host response cap |
+| Minified HTML shell source, excluding injected CSS/JS | 8,144 bytes | Under 8 KiB hard ceiling |
+| CSS source before minification | 8,520 bytes | Under 12 KiB hard ceiling |
+| JavaScript source before minification | 16,409 bytes | Under 25 KiB hard ceiling |
 | URI handlers added for UI assets | 0 | Preserves existing 17-handler table |
 
-On ESP-IDF, `GET /` sends the generated const asset directly with `httpd_resp_send()` and does not allocate the `RULE_WEB_MAX_RESPONSE` heap buffer used by JSON/API routes. Host tests still exercise `rule_web_handle_request()` by copying the generated asset into the caller-provided test buffer.
+The richer layout increases decoded document size, so the plain host fixture ceiling moves from 16 KiB to the existing 32 KiB cap. Only the host HTML test uses a larger caller-owned buffer; ordinary JSON test buffers and every device API allocation limit stay unchanged. Firmware contains no plain duplicate, gzip library, or decompression buffer. The ESP32-S3 ELF confirms the compressed array resides in `.rodata`. The compressed payload excludes its one-byte terminator and four-byte length constant.
+
+The two-section revision adds listing, creation, and editing of any saved rule, plus a separate native dialog. That functionality raises the compressed page above the aspirational 8 KiB target without changing its 16 KiB ceiling. The main list reads `/api/config?view=list` through the existing configuration handler with a 2 KiB response allocation. It returns only rule identity, name, enabled state, trigger source, first action type, and action count, never credentials or action payloads. Display-only control characters in names become spaces to bound JSON expansion; the full configuration retains original names. Host tests verify eight maximum-length names fit, including quotes, backslashes, and control characters. There is no second long-lived firmware configuration model. On phones, the existing navigation becomes a native browser popover drawer with manual open/close, Escape and outside-tap dismissal. CSS transitions slide the drawer in and out over 240 ms and fade its backdrop; reduced-motion preferences disable these transitions. It adds no dependency, firmware allocation, HTTP handler, or polling.
+
+On ESP-IDF, `GET /` sends the generated compressed const asset directly with `httpd_resp_send()` and does not allocate the `RULE_WEB_MAX_RESPONSE` heap buffer used by JSON/API routes. Host tests still exercise `rule_web_handle_request()` by copying the generated asset into the caller-provided test buffer.
+
+## Browser request policy
+
+No API requests occur before pairing. Unlock on the default Automations page reads only `/api/config?view=list`. New automation or selecting a saved entry loads capabilities and the full configuration into the browser before opening the editor. Saving patches the selected rule and first action in that snapshot, preserving other rules, additional actions, and masked credentials. Settings reads Wi-Fi status; time and diagnostics load when their sections are opened. Full export is also fetched on explicit backup export/reload. Scans and probes remain manual. There are no background fetch intervals. Requests time out after 20 seconds, restore buttons on failure, and clear the in-memory code on HTTP 401. Browser Lock clears the code, list, cached configuration, and editor; it does not stop the device Web UI service.
+
+The generated asset tests compile both preprocessor branches, validate gzip decompression against the document, and enforce the compressed page ceiling. Browser validation uses API fixtures, not a physical device. Physical minimum-heap and largest-block measurements remain required.
 
 ## Design rules
 
@@ -71,6 +83,6 @@ On ESP-IDF, `GET /` sends the generated const asset directly with `httpd_resp_se
 
 The old 511-byte payload limit could not accept even the firmware's own default export. The configuration API now exports all eight possible rules and all three actions per rule; importing that export preserves HTTP bearer tokens through an explicit `masked` marker tied to the existing rule ID and action slot. A new action cannot import a masked secret that does not exist locally. `empty` or an empty string clears a token. Legacy flat form submissions update the first rule/action while retaining the remaining rules/actions.
 
-Only `/api/config` allocates the 32 KiB response. Ordinary JSON responses use 2 KiB; capabilities retain 16 KiB. Request allocation uses the actual body length plus its terminator. The JSON parser is upstream cJSON 1.7.19, with a nesting limit of 16, a node limit of 1,024, duplicate-key rejection, and checked strings/integer ranges. Parser storage is released before applying a configuration. Applying and saving temporarily holds one candidate configuration. GPIO preparation precedes the persistence callback; failed persistence restores hardware ownership and leaves the engine, counters, and event sequence unchanged. Heap allocation failure returns an error.
+Only complete `/api/config` GET exports allocate the 32 KiB response. The list query and ordinary JSON responses use 2 KiB; capabilities retain 16 KiB. Request allocation uses the actual body length plus its terminator. The JSON parser is upstream cJSON 1.7.19, with a nesting limit of 16, a node limit of 1,024, duplicate-key rejection, and checked strings/integer ranges. Parser storage is released before applying a configuration. Applying and saving temporarily holds one candidate configuration. GPIO preparation precedes the persistence callback; failed persistence restores hardware ownership and leaves the engine, counters, and event sequence unchanged. Heap allocation failure returns an error.
 
 A full import may therefore exceed the former 16 KiB temporary-heap ceiling. These explicit bounds replace that inaccurate ceiling; measure minimum free heap and the largest free block on the physical board before release. The static page still streams directly from flash, and generated asset, handler-count, HTTP-stack, and polling budgets remain unchanged.
