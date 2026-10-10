@@ -3,6 +3,7 @@
 #include "trigger_gpio.h"
 #include "trigger_hat.h"
 #include "ui_model.h"
+#include "cJSON.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -59,6 +60,49 @@ static bool request_with_snapshot(rule_web_t *web, rule_web_method_t method, con
     return ok;
 }
 
+
+/* Build a browser-style snapshot by editing one rule in a freshly read export. */
+static bool edit_first_rule(rule_web_t *web, const char *edit, char *out, size_t out_len)
+{
+    char exported[32768];
+    if (!rule_web_handle_request(web, RULE_WEB_METHOD_GET, "/api/config", NULL, exported, sizeof(exported))) return false;
+    cJSON *snapshot = cJSON_Parse(exported), *patch = cJSON_Parse(edit);
+    ASSERT_TRUE(snapshot != NULL && patch != NULL);
+    cJSON *rule = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(snapshot, "rules"), 0);
+    ASSERT_TRUE(rule != NULL);
+    const cJSON *source = cJSON_GetObjectItemCaseSensitive(patch, "source");
+    if (source != NULL && strcmp(source->valuestring, cJSON_GetObjectItemCaseSensitive(rule, "source")->valuestring) != 0) {
+        const char *fields[] = {"source_key", "threshold_kind", "threshold_i32", "threshold_bool", "comparator", "sustain_ms"};
+        for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i)
+            cJSON_DeleteItemFromObjectCaseSensitive(rule, fields[i]);
+    }
+    const cJSON *item;
+    cJSON_ArrayForEach(item, patch) {
+        if (strcmp(item->string, "actions") == 0) {
+            cJSON *action = cJSON_GetArrayItem(cJSON_GetObjectItemCaseSensitive(rule, "actions"), 0);
+            const cJSON *type = cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(item, 0), "action");
+            if (type != NULL && strcmp(type->valuestring, cJSON_GetObjectItemCaseSensitive(action, "action")->valuestring) != 0) {
+                cJSON *fresh = cJSON_CreateObject();
+                ASSERT_TRUE(cJSON_ReplaceItemInArray(cJSON_GetObjectItemCaseSensitive(rule, "actions"), 0, fresh));
+                action = fresh;
+            }
+            const cJSON *field;
+            cJSON_ArrayForEach(field, cJSON_GetArrayItem(item, 0)) {
+                cJSON_DeleteItemFromObjectCaseSensitive(action, field->string);
+                ASSERT_TRUE(cJSON_AddItemToObject(action, field->string, cJSON_Duplicate(field, true)));
+            }
+        } else {
+            cJSON_DeleteItemFromObjectCaseSensitive(rule, item->string);
+            ASSERT_TRUE(cJSON_AddItemToObject(rule, item->string, cJSON_Duplicate(item, true)));
+        }
+    }
+    char *body = cJSON_PrintUnformatted(snapshot);
+    ASSERT_TRUE(body != NULL);
+    const bool ok = request_with_snapshot(web, RULE_WEB_METHOD_POST, "/api/config", body, out, out_len);
+    cJSON_free(body); cJSON_Delete(patch); cJSON_Delete(snapshot);
+    return ok;
+}
+
 static void test_gpio_digital_debounce_emits_safe_pin(void)
 {
     trigger_gpio_t gpio;
@@ -109,7 +153,7 @@ static void test_rule_web_status(void)
     ASSERT_TRUE(strstr(json, "\"wifi\"") != NULL);
     ASSERT_TRUE(strstr(json, "\"sound\"") != NULL);
     ASSERT_TRUE(strstr(json, "audio_capture_disabled") != NULL);
-    char page[32768]; /* Plain HTML host fixture; ESP serves gzip directly from flash. */
+    char page[40960]; /* Plain HTML host fixture; ESP serves gzip directly from flash. */
     ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_GET, "/", NULL, page, sizeof(page)));
     ASSERT_TRUE(strstr(page, "Trigger source") != NULL);
     ASSERT_TRUE(strstr(page, "Configuration backup") != NULL);
@@ -191,6 +235,12 @@ static void test_rule_web_status(void)
     ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/wifi/mode",
                                         "{\"mode\":\"ap\"}", json, sizeof(json)));
     ASSERT_TRUE(strstr(json, "\"ok\"") != NULL);
+    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/wifi/mode",
+                                        "{\"mode\":\"sta\"}", json, sizeof(json)));
+    ASSERT_TRUE(strstr(json, "invalid_mode") != NULL);
+    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/wifi/mode",
+                                        "{\"mode\":\"wifi\"}", json, sizeof(json)));
+    ASSERT_TRUE(strstr(json, "invalid_mode") == NULL);
     ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_GET, "/api/capabilities", NULL, json, sizeof(json)));
     ASSERT_TRUE(strstr(json, "pin_conflicts") != NULL);
     ASSERT_TRUE(strstr(json, "source_capabilities") != NULL);
@@ -209,55 +259,41 @@ static void test_rule_web_status(void)
     snprintf(exported, sizeof(exported), "%s", json);
     ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config", exported, json, sizeof(json)));
     ASSERT_TRUE(strstr(json, "config rejected") == NULL);
-    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config", "defaults", json, sizeof(json)));
+    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config", exported, json, sizeof(json)));
     ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/rules/test", NULL, json, sizeof(json)));
-    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config", "{\"preset\":\"sound_local_ui\"}", json, sizeof(json)));
+    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config", "{\"rules\":[{\"id\":1,\"enabled\":true,\"name\":\"Sound clipped alert\",\"source\":\"sound.clipped\",\"actions\":[{\"action\":\"local_ui\"}]}]}", json, sizeof(json)));
     ASSERT_TRUE(s_config_changed_count > 0);
     ASSERT_TRUE(s_last_config_changed.rules[0].when.source == RULE_SOURCE_SOUND_CLIPPED);
     ASSERT_TRUE(strstr(json, "Sound clipped alert") != NULL);
     ASSERT_TRUE(strstr(json, "sound.clipped") != NULL);
-    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config", "{\"preset\":\"loud_sound_local_ui\"}", json, sizeof(json)));
+    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config", "{\"rules\":[{\"id\":1,\"enabled\":true,\"name\":\"Loud sound alert\",\"source\":\"sound.rms_dbfs\",\"threshold_i32\":-5120,\"sustain_ms\":250,\"actions\":[{\"action\":\"local_ui\"}]}]}", json, sizeof(json)));
     ASSERT_TRUE(strstr(json, "Loud sound alert") != NULL);
     ASSERT_TRUE(strstr(json, "sound.rms_dbfs") != NULL);
     ASSERT_TRUE(strstr(json, "\"comparator\":\"gte\"") != NULL);
     ASSERT_TRUE(strstr(json, "\"threshold_i32\":-5120") != NULL);
     ASSERT_TRUE(strstr(json, "\"sustain_ms\":250") != NULL);
-    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config",
-                                        "{\"source\":\"sound.peak_dbfs\",\"action\":\"local_ui\"}",
-                                        json, sizeof(json)));
+    ASSERT_TRUE(edit_first_rule(&web, "{\"source\":\"sound.peak_dbfs\",\"actions\":[{\"action\":\"local_ui\"}]}", json, sizeof(json)));
     ASSERT_TRUE(strstr(json, "sound.peak_dbfs") != NULL);
     ASSERT_TRUE(strstr(json, "\"comparator\":\"gte\"") != NULL);
     ASSERT_TRUE(strstr(json, "\"threshold_i32\":-5120") != NULL);
     ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/rules/test", NULL, json, sizeof(json)));
-    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config",
-                                        "{\"source\":\"button.key1.short\",\"action\":\"http_post\",\"http_url\":\"https://example.invalid/hook\",\"http_bearer_token\":\"secret-token\"}",
-                                        json, sizeof(json)));
+    ASSERT_TRUE(edit_first_rule(&web, "{\"source\":\"button.key1.short\",\"actions\":[{\"action\":\"http_post\",\"http_url\":\"https://example.invalid/hook\",\"http_bearer_token\":\"secret-token\"}]}", json, sizeof(json)));
     ASSERT_TRUE(strstr(json, "masked") != NULL);
     ASSERT_TRUE(strstr(json, "secret-token") == NULL);
-    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config",
-                                        "{\"source\":\"button.key1.short\",\"action\":\"speaker_tone\",\"speaker_frequency_hz\":7000,\"speaker_duration_ms\":100,\"speaker_volume_percent\":50,\"action_timeout_ms\":100}",
-                                        json, sizeof(json)));
+    ASSERT_TRUE(edit_first_rule(&web, "{\"source\":\"button.key1.short\",\"actions\":[{\"action\":\"speaker_tone\",\"speaker_frequency_hz\":7000,\"speaker_duration_ms\":100,\"speaker_volume_percent\":50,\"action_timeout_ms\":100}]}", json, sizeof(json)));
     ASSERT_TRUE(strstr(json, "speaker_tone") != NULL);
     ASSERT_TRUE(strstr(json, "\"speaker_frequency_hz\":7000") != NULL);
     ASSERT_TRUE(strstr(json, "\"speaker_volume_percent\":50") != NULL);
     ASSERT_TRUE(s_last_config_changed.rules[0].actions[0].type == RULE_ACTION_SPEAKER_TONE);
     ASSERT_TRUE(s_last_config_changed.rules[0].actions[0].speaker_frequency_hz == 7000u);
-    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config",
-                                        "{\"source\":\"button.key1.short\",\"action\":\"speaker_tone\",\"speaker_frequency_hz\":9000,\"speaker_duration_ms\":100,\"speaker_volume_percent\":50,\"action_timeout_ms\":100}",
-                                        json, sizeof(json)));
+    ASSERT_TRUE(edit_first_rule(&web, "{\"source\":\"button.key1.short\",\"actions\":[{\"action\":\"speaker_tone\",\"speaker_frequency_hz\":9000,\"speaker_duration_ms\":100,\"speaker_volume_percent\":50,\"action_timeout_ms\":100}]}", json, sizeof(json)));
     ASSERT_TRUE(strstr(json, "config rejected") != NULL);
-    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config",
-                                        "{\"source\":\"button.key1.short\",\"action\":\"local_ui\",\"name\":\"Quote \\\"slash\\\\ line\\n\"}",
-                                        json, sizeof(json)));
+    ASSERT_TRUE(edit_first_rule(&web, "{\"source\":\"button.key1.short\",\"name\":\"Quote \\\"slash\\\\ line\\n\",\"actions\":[{\"action\":\"local_ui\"}]}", json, sizeof(json)));
     ASSERT_TRUE(strstr(json, "Quote \\\"slash\\\\ line\\n") != NULL);
     ASSERT_TRUE(strstr(json, "Quote \"slash") == NULL);
-    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config",
-                                        "{\"source\":\"button.key1.short\",\"action\":\"http_post\",\"http_url\":\"ftp://bad.invalid/hook\"}",
-                                        json, sizeof(json)));
+    ASSERT_TRUE(edit_first_rule(&web, "{\"source\":\"button.key1.short\",\"actions\":[{\"action\":\"http_post\",\"http_url\":\"ftp://bad.invalid/hook\"}]}", json, sizeof(json)));
     ASSERT_TRUE(strstr(json, "config rejected") != NULL);
-    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config",
-                                        "{\"source\":\"gpio.digital\",\"action\":\"local_ui\",\"gpio_pin\":4,\"gpio_profile\":\"digital_high_low\",\"gpio_debounce_ms\":20}",
-                                        json, sizeof(json)));
+    ASSERT_TRUE(edit_first_rule(&web, "{\"source\":\"gpio.digital\",\"gpio_pin\":4,\"gpio_profile\":\"digital_high_low\",\"gpio_debounce_ms\":20,\"actions\":[{\"action\":\"local_ui\"}]}", json, sizeof(json)));
     ASSERT_TRUE(strstr(json, "gpio.digital") != NULL);
     ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/gpio/test",
                                         "{\"gpio_pin\":4,\"gpio_profile\":\"digital_high_low\",\"gpio_debounce_ms\":20}",
@@ -275,9 +311,7 @@ static void test_rule_web_status(void)
                                         "{\"gpio_pin\":39,\"gpio_profile\":\"digital_high_low\",\"gpio_debounce_ms\":20}",
                                         json, sizeof(json)));
     ASSERT_TRUE(strstr(json, "\"ok\":false") != NULL);
-    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config",
-                                        "{\"source\":\"gpio.edge\",\"action\":\"local_ui\",\"gpio_pin\":4,\"gpio_profile\":\"rising_edge\",\"gpio_debounce_ms\":20}",
-                                        json, sizeof(json)));
+    ASSERT_TRUE(edit_first_rule(&web, "{\"source\":\"gpio.edge\",\"gpio_pin\":4,\"gpio_profile\":\"rising_edge\",\"gpio_debounce_ms\":20,\"actions\":[{\"action\":\"local_ui\"}]}", json, sizeof(json)));
     ASSERT_TRUE(strstr(json, "gpio.edge") != NULL);
     ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/gpio/test",
                                         "{\"source\":\"gpio.edge\",\"gpio_pin\":4,\"gpio_profile\":\"rising_edge\",\"gpio_debounce_ms\":20}",
@@ -362,15 +396,13 @@ static void test_complete_config_roundtrip_and_strict_parser(void)
         ASSERT_TRUE(strstr(result, "\"error\"") != NULL);
         ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
     }
-    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config",
-        "{\"source\":\"button.key1.short\",\"action\":\"http_post\",\"name\":\"sound_local_ui\"}", result, sizeof(result)));
+    ASSERT_TRUE(edit_first_rule(&web, "{\"source\":\"button.key1.short\",\"name\":\"sound_local_ui\",\"actions\":[{\"action\":\"http_post\"}]}", result, sizeof(result)));
     ASSERT_TRUE(runtime.engine.config.rules[0].when.source == RULE_SOURCE_KEY1_SHORT);
     ASSERT_EQ_U32(8, runtime.engine.config.rule_count);
     ASSERT_EQ_U32(3, runtime.engine.config.rules[0].action_count);
     rule_config_store_close(&store);
     automation_config_t before = runtime.engine.config;
-    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config",
-        "{\"source\":\"button.key1.short\",\"action\":\"local_ui\",\"name\":\"unsaved\"}", result, sizeof(result)));
+    ASSERT_TRUE(edit_first_rule(&web, "{\"source\":\"button.key1.short\",\"name\":\"unsaved\",\"actions\":[{\"action\":\"local_ui\"}]}", result, sizeof(result)));
     ASSERT_TRUE(strstr(result, "\"error\"") != NULL);
     ASSERT_TRUE(memcmp(&before, &runtime.engine.config, sizeof(before)) == 0);
 
@@ -417,25 +449,28 @@ static void test_config_edits_and_roundtrip_preserve_unedited_state(void)
     ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_GET, "/api/config", NULL, exported, sizeof(exported)));
     ASSERT_TRUE(strstr(exported, "roundtrip-secret") == NULL);
     ASSERT_TRUE(strstr(exported, "\"rules\":[") != NULL);
+    cJSON *document = cJSON_Parse(exported);
+    ASSERT_TRUE(document != NULL);
+    ASSERT_TRUE(cJSON_GetObjectItemCaseSensitive(document, "source") == NULL);
+    ASSERT_TRUE(cJSON_GetObjectItemCaseSensitive(document, "action") == NULL);
+    ASSERT_TRUE(cJSON_GetObjectItemCaseSensitive(document, "name") == NULL);
+    cJSON_Delete(document);
     ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config", exported, response, sizeof(response)));
     ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
-    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config",
-        "{\"source\":\"button.key1.short\",\"action\":\"http_post\",\"name\":\"Edited name\"}", response, sizeof(response)));
+    ASSERT_TRUE(edit_first_rule(&web, "{\"source\":\"button.key1.short\",\"name\":\"Edited name\",\"actions\":[{\"action\":\"http_post\"}]}", response, sizeof(response)));
     snprintf(config.rules[0].name, RULE_NAME_MAX, "Edited name");
     ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
     automation_config_t saved;
     ASSERT_TRUE(rule_config_store_load(&store, &saved));
     ASSERT_TRUE(memcmp(&config, &saved, sizeof(config)) == 0);
     rule_config_store_close(&store);
-    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config",
-        "{\"source\":\"button.key1.short\",\"action\":\"http_post\",\"name\":\"Failed save\"}", response, sizeof(response)));
+    ASSERT_TRUE(edit_first_rule(&web, "{\"source\":\"button.key1.short\",\"name\":\"Failed save\",\"actions\":[{\"action\":\"http_post\"}]}", response, sizeof(response)));
     ASSERT_TRUE(strstr(response, "config rejected") != NULL);
     ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
     ASSERT_TRUE(rule_config_store_open(&store));
     ASSERT_TRUE(rule_config_store_load(&store, &saved));
     ASSERT_TRUE(memcmp(&config, &saved, sizeof(config)) == 0);
-    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config",
-        "{\"source\":\"button.key1.short\",\"action\":\"http_post\",\"http_bearer_token\":\"\"}", response, sizeof(response)));
+    ASSERT_TRUE(edit_first_rule(&web, "{\"source\":\"button.key1.short\",\"actions\":[{\"action\":\"http_post\",\"http_bearer_token\":\"\"}]}", response, sizeof(response)));
     config.rules[0].actions[0].http_bearer_token[0] = '\0';
     ASSERT_TRUE(runtime.engine.config.rules[0].actions[0].http_bearer_token[0] == '\0');
     ASSERT_TRUE(memcmp(&config.rules[1], &runtime.engine.config.rules[1], sizeof(config.rules[1])) == 0);
@@ -462,11 +497,9 @@ static void test_speaker_form_save_preserves_parameters_and_rejects_wrapped_volu
     ASSERT_TRUE(rule_config_store_open(&store));
     ASSERT_TRUE(rule_web_start(&web, &runtime, &store));
     char response[16384];
-    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config",
-        "{\"source\":\"button.key1.short\",\"action\":\"speaker_tone\"}", response, sizeof(response)));
+    ASSERT_TRUE(edit_first_rule(&web, "{\"source\":\"button.key1.short\",\"actions\":[{\"action\":\"speaker_tone\"}]}", response, sizeof(response)));
     ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
-    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config",
-        "{\"source\":\"button.key1.short\",\"action\":\"speaker_tone\",\"speaker_volume_percent\":306}", response, sizeof(response)));
+    ASSERT_TRUE(edit_first_rule(&web, "{\"source\":\"button.key1.short\",\"actions\":[{\"action\":\"speaker_tone\",\"speaker_volume_percent\":306}]}", response, sizeof(response)));
     ASSERT_TRUE(strstr(response, "error") != NULL);
     ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
     rule_config_store_close(&store);
@@ -543,8 +576,7 @@ static void test_strict_config_parsing_preserves_runtime_and_store(void)
     ASSERT_TRUE(rule_web_start(&web, &runtime, &store));
     rule_web_set_config_changed_callback(&web, capture_config_changed, NULL);
     char response[16384];
-    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config",
-        "{\"source\":\"sound.rms_dbfs\",\"action\":\"http_post\",\"enabled\":false,\"name\":\"button_local_ui\"}", response, sizeof(response)));
+    ASSERT_TRUE(edit_first_rule(&web, "{\"source\":\"sound.rms_dbfs\",\"enabled\":false,\"name\":\"button_local_ui\",\"actions\":[{\"action\":\"http_post\"}]}", response, sizeof(response)));
     snprintf(config.rules[0].name, RULE_NAME_MAX, "button_local_ui");
     ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
     char exported[32768];
@@ -552,6 +584,15 @@ static void test_strict_config_parsing_preserves_runtime_and_store(void)
     ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config", exported, response, sizeof(response)));
     ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
     const char *invalid[] = {
+        "defaults",
+        "button_local_ui",
+        "{\"preset\":\"defaults\"}",
+        "{\"source\":\"sound.rms_dbfs\",\"action\":\"http_post\"}",
+        "{\"rules\":[{\"id\":1,\"action\":\"local_ui\"}]}",
+        "{\"rules\":[{\"id\":1,\"cooldown_ms\":1.5,\"actions\":[{\"action\":\"local_ui\"}]}]}",
+        "{\"rules\":[{\"id\":1,\"name\":\"bad\\u0000name\",\"actions\":[{\"action\":\"local_ui\"}]}]}",
+        "{\"rules\":[{\"id\":1,\"actions\":[{\"action\":\"speaker_tone\",\"speaker_volume_percent\":306}]}]}",
+        "{\"rules\":[{\"id\":1,\"actions\":[{\"action\":\"http_post\",\"http_bearer_token\":false}]}]}",
         "{\"rules\":[{\"id\":1,\"cooldown_ms\":01000}]}",
         "{\"rules\":[{\"id\":1,\"cooldown_ms\":1000.}]}",
         "{\"rules\":[{\"id\":1,\"cooldown_ms\":1e}]}",
@@ -604,13 +645,8 @@ static void test_strict_config_parsing_preserves_runtime_and_store(void)
         ASSERT_TRUE(rule_config_store_load(&store, &saved));
         ASSERT_TRUE(memcmp(&config, &saved, sizeof(config)) == 0);
     }
-    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config",
-        " \n{\"source\":\"sound.rms_dbfs\",\"action\":\"http_post\",\"name\":\"\\u00e9\\uD83D\\uDE00\"} \n", response, sizeof(response)));
+    ASSERT_TRUE(edit_first_rule(&web, "{\"source\":\"sound.rms_dbfs\",\"name\":\"\\u00e9\\ud83d\\ude00\",\"actions\":[{\"action\":\"http_post\"}]}", response, sizeof(response)));
     snprintf(config.rules[0].name, RULE_NAME_MAX, "\xc3\xa9\xf0\x9f\x98\x80");
-    ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
-    ASSERT_TRUE(request_with_snapshot(&web, RULE_WEB_METHOD_POST, "/api/config",
-        " {\"preset\":\"defaults\"} \n", response, sizeof(response)));
-    automation_config_set_defaults(&config);
     ASSERT_TRUE(memcmp(&config, &runtime.engine.config, sizeof(config)) == 0);
     rule_web_stop(&web);
     rule_config_store_close(&store);
@@ -718,21 +754,96 @@ static void test_session_authorization_and_small_config_ack(void)
     ASSERT_TRUE(rule_runtime_init(&runtime, &config));
     ASSERT_TRUE(rule_config_store_open(&store));
     ASSERT_TRUE(rule_web_start(&web, &runtime, &store));
-    ASSERT_TRUE(!rule_web_authorize(&web, "0123456789abcdef"));
-    rule_web_set_access_token(&web, "0123456789abcdef");
-    ASSERT_TRUE(!rule_web_authorize(&web, NULL));
-    ASSERT_TRUE(rule_web_authorize(&web, "0123456789abcdef"));
-    for (int i = 0; i < 4; ++i) ASSERT_TRUE(!rule_web_authorize(&web, "wrong"));
-    ASSERT_TRUE(!rule_web_authorize(&web, "0123456789abcdef"));
-    rule_web_set_access_token(&web, "fedcba9876543210");
-    ASSERT_TRUE(!rule_web_authorize(&web, "0123456789abcdef"));
-    ASSERT_TRUE(rule_web_authorize(&web, "fedcba9876543210"));
+    const char *token = "0123456789abcdef0123456789abcdef";
+    char auth[128];
+    ASSERT_FALSE(rule_web_authorize(&web, token));
+    ASSERT_EQ_U32(200, rule_web_handle_auth(&web, RULE_WEB_METHOD_POST, token, "request", 0, auth, sizeof(auth)));
+    ASSERT_FALSE(rule_web_authorize(&web, token));
+    ASSERT_TRUE(rule_web_decide_auth(&web, rule_web_pending_auth(&web, 1), true, 1));
+    ASSERT_TRUE(rule_web_authorize(&web, token));
+    for (int i = 0; i < 20; ++i) ASSERT_FALSE(rule_web_authorize(&web, "wrong"));
+    ASSERT_TRUE(rule_web_authorize(&web, token)); /* Invalid traffic cannot lock out an approved browser. */
     char ack[32];
-    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config", "defaults", ack, sizeof(ack)));
+    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config", "{\"schema_version\":1,\"rules\":[]}", ack, sizeof(ack)));
     ASSERT_TRUE(strcmp(ack, "{\"ok\":true}") == 0);
     rule_web_stop(&web);
-    ASSERT_TRUE(!rule_web_authorize(&web, "fedcba9876543210"));
-    ASSERT_TRUE(web.access_token[0] == '\0');
+    ASSERT_FALSE(rule_web_authorize(&web, token));
+    ASSERT_EQ_U32(0, rule_web_pending_auth(&web, 2));
+    rule_config_store_close(&store);
+}
+
+static void test_device_approval_sessions(void)
+{
+    automation_config_t config; automation_config_set_defaults(&config);
+    rule_runtime_t runtime; rule_config_store_t store; rule_web_t web;
+    ASSERT_TRUE(rule_runtime_init(&runtime, &config));
+    ASSERT_TRUE(rule_config_store_open(&store));
+    ASSERT_TRUE(rule_web_start_locked(&web, &runtime, &store, capture_runtime_lock, capture_runtime_unlock, NULL));
+    s_runtime_lock_count = s_runtime_unlock_count = 0;
+    const char *a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", *b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    char response[128];
+    ASSERT_EQ_U32(400, rule_web_handle_auth(&web, RULE_WEB_METHOD_POST, "bad", "request", 0, response, sizeof(response)));
+    ASSERT_EQ_U32(400, rule_web_handle_auth(&web, RULE_WEB_METHOD_POST, a, "approve", 0, response, sizeof(response)));
+    ASSERT_EQ_U32(400, rule_web_handle_auth(&web, RULE_WEB_METHOD_GET, a, "request", 0, response, sizeof(response)));
+    ASSERT_EQ_U32(200, rule_web_handle_auth(&web, RULE_WEB_METHOD_GET, a, NULL, 0, response, sizeof(response)));
+    ASSERT_TRUE(strstr(response, "\"none\"") != NULL);
+    ASSERT_EQ_U32(0, rule_web_pending_auth(&web, 0));
+    ASSERT_EQ_U32(200, rule_web_handle_auth(&web, RULE_WEB_METHOD_POST, a, "request", 100, response, sizeof(response)));
+    uint32_t first = rule_web_pending_auth(&web, 100);
+    ASSERT_TRUE(first != 0);
+    ASSERT_TRUE(strstr(response, a) == NULL);
+    ASSERT_FALSE(rule_web_authorize(&web, a));
+    ASSERT_EQ_U32(409, rule_web_handle_auth(&web, RULE_WEB_METHOD_POST, b, "request", 101, response, sizeof(response)));
+    ASSERT_EQ_U32(first, rule_web_pending_auth(&web, 102));
+    ASSERT_EQ_U32(200, rule_web_handle_auth(&web, RULE_WEB_METHOD_POST, a, "request", 500, response, sizeof(response)));
+    ASSERT_EQ_U32(first, rule_web_pending_auth(&web, 501)); /* Duplicate requests do not replace the prompt. */
+    ASSERT_FALSE(rule_web_decide_auth(&web, first + 1, true, 502));
+    ASSERT_TRUE(rule_web_decide_auth(&web, first, false, 503));
+    ASSERT_FALSE(rule_web_authorize(&web, a));
+    ASSERT_EQ_U32(200, rule_web_handle_auth(&web, RULE_WEB_METHOD_GET, a, NULL, 504, response, sizeof(response)));
+    ASSERT_TRUE(strstr(response, "\"denied\"") != NULL);
+    ASSERT_EQ_U32(200, rule_web_handle_auth(&web, RULE_WEB_METHOD_POST, b, "request", 505, response, sizeof(response)));
+    uint32_t second = rule_web_pending_auth(&web, 506);
+    ASSERT_EQ_U32(200, rule_web_handle_auth(&web, RULE_WEB_METHOD_GET, a, NULL, 506, response, sizeof(response)));
+    ASSERT_TRUE(strstr(response, "\"denied\"") != NULL); /* Keep the decision readable when a free slot exists. */
+    ASSERT_TRUE(second != first);
+    ASSERT_FALSE(rule_web_decide_auth(&web, first, true, 506)); /* Stale device input cannot approve another browser. */
+    ASSERT_TRUE(rule_web_decide_auth(&web, second, true, 507));
+    ASSERT_TRUE(rule_web_authorize(&web, b));
+    ASSERT_FALSE(rule_web_authorize(&web, a));
+    ASSERT_EQ_U32(200, rule_web_handle_auth(&web, RULE_WEB_METHOD_POST, a, "cancel", 508, response, sizeof(response)));
+    ASSERT_TRUE(rule_web_authorize(&web, b)); /* A different browser cannot revoke the approved session. */
+    ASSERT_EQ_U32(200, rule_web_handle_auth(&web, RULE_WEB_METHOD_POST, a, "request", UINT32_MAX - 100, response, sizeof(response)));
+    uint32_t third = rule_web_pending_auth(&web, UINT32_MAX - 99);
+    ASSERT_EQ_U32(200, rule_web_handle_auth(&web, RULE_WEB_METHOD_POST, a, "request", 200, response, sizeof(response)));
+    ASSERT_EQ_U32(third, rule_web_pending_auth(&web, RULE_WEB_AUTH_TIMEOUT_MS - 102));
+    ASSERT_EQ_U32(0, rule_web_pending_auth(&web, RULE_WEB_AUTH_TIMEOUT_MS - 101));
+    ASSERT_FALSE(rule_web_decide_auth(&web, third, true, RULE_WEB_AUTH_TIMEOUT_MS - 100));
+    ASSERT_EQ_U32(200, rule_web_handle_auth(&web, RULE_WEB_METHOD_GET, a, NULL, 60000, response, sizeof(response)));
+    ASSERT_TRUE(strstr(response, "\"expired\"") != NULL); /* Retries did not extend the original deadline. */
+    ASSERT_EQ_U32(200, rule_web_handle_auth(&web, RULE_WEB_METHOD_POST, b, "cancel", 60001, response, sizeof(response)));
+    ASSERT_FALSE(rule_web_authorize(&web, b));
+    for (size_t i = 0; i < RULE_WEB_AUTH_SESSIONS; ++i) {
+        char token[RULE_WEB_AUTH_TOKEN_LEN + 1];
+        memset(token, '0' + (int)i, RULE_WEB_AUTH_TOKEN_LEN); token[RULE_WEB_AUTH_TOKEN_LEN] = '\0';
+        ASSERT_EQ_U32(200, rule_web_handle_auth(&web, RULE_WEB_METHOD_POST, token, "request", 61000, response, sizeof(response)));
+        ASSERT_TRUE(rule_web_decide_auth(&web, rule_web_pending_auth(&web, 61000), true, 61000));
+        ASSERT_TRUE(rule_web_authorize(&web, token));
+    }
+    ASSERT_EQ_U32(409, rule_web_handle_auth(&web, RULE_WEB_METHOD_POST, a, "request", 62000, response, sizeof(response)));
+    ASSERT_TRUE(rule_web_authorize(&web, "00000000000000000000000000000000")); /* Full capacity does not evict approved browsers. */
+    rule_web_stop(&web);
+    ASSERT_FALSE(rule_web_authorize(&web, "00000000000000000000000000000000"));
+    ASSERT_EQ_U32(503, rule_web_handle_auth(&web, RULE_WEB_METHOD_GET, a, NULL, 62001, response, sizeof(response)));
+    ASSERT_EQ_U32(s_runtime_lock_count, s_runtime_unlock_count);
+    ASSERT_TRUE(rule_web_start(&web, &runtime, &store));
+    ASSERT_FALSE(rule_web_authorize(&web, "00000000000000000000000000000000"));
+    ASSERT_EQ_U32(0, rule_web_pending_auth(&web, 62002));
+    ASSERT_EQ_U32(200, rule_web_handle_auth(&web, RULE_WEB_METHOD_POST, a, "request", 62003, response, sizeof(response)));
+    ASSERT_FALSE(rule_web_decide_auth(&web, first, true, 62003)); /* IDs are not reused on service reopen. */
+    ASSERT_EQ_U32(200, rule_web_handle_auth(&web, RULE_WEB_METHOD_POST, a, "cancel", 62004, response, sizeof(response)));
+    ASSERT_EQ_U32(0, rule_web_pending_auth(&web, 62005));
+    rule_web_stop(&web);
     rule_config_store_close(&store);
 }
 
@@ -780,6 +891,7 @@ int main(void)
     test_rule_list_fits_small_response_and_hides_secrets();
     test_first_action_contract_and_rejection_sequence();
     test_session_authorization_and_small_config_ack();
+    test_device_approval_sessions();
     test_strict_config_parsing_preserves_runtime_and_store();
     test_browser_lcd_roundtrip_preserves_unedited_settings();
     test_config_edits_and_roundtrip_preserve_unedited_state();

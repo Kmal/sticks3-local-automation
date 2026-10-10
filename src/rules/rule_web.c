@@ -16,11 +16,14 @@
 #define RULE_WEB_MAX_BODY 32768u
 #define RULE_WEB_MAX_RESPONSE 32768u
 #define RULE_WEB_SMALL_BODY 512u
+/* Keep IDs distinct across service reopenings so old LCD decisions cannot
+ * accidentally match the first request of a new service session. */
+static _Atomic uint32_t s_auth_request_id;
 
 #ifdef ESP_PLATFORM
 #include "esp_err.h"
 #include "esp_log.h"
-#include "esp_random.h"
+#include "esp_timer.h"
 #include "esp_heap_caps.h"
 
 
@@ -38,14 +41,37 @@ static esp_err_t rule_web_http_handler(httpd_req_t *req)
 
     if (req->method == HTTP_GET && strcmp(req->uri, "/favicon.ico") == 0)
         return httpd_resp_send(req, "", 0);
-    char token[17] = {0};
-    if (httpd_req_get_hdr_value_len(req, "X-Device-Token") == 16)
+    char token[RULE_WEB_AUTH_TOKEN_LEN + 1u] = {0};
+    if (httpd_req_get_hdr_value_len(req, "X-Device-Token") == RULE_WEB_AUTH_TOKEN_LEN)
         (void)httpd_req_get_hdr_value_str(req, "X-Device-Token", token, sizeof(token));
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    if (strcmp(req->uri, "/api/auth") == 0) {
+        /* The only public API: fixed stack buffers, no config access. A custom
+         * header prevents cross-origin forms from creating approval prompts. */
+        char body[8] = {0}, response[128];
+        if (req->content_len >= sizeof(body)) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid auth action");
+            return ESP_FAIL;
+        }
+        size_t received = 0;
+        while (received < req->content_len) {
+            int n = httpd_req_recv(req, body + received, req->content_len - received);
+            if (n <= 0) return ESP_FAIL;
+            received += (size_t)n;
+        }
+        if (memchr(body, '\0', received) != NULL) return ESP_FAIL;
+        unsigned status = rule_web_handle_auth(web, req->method == HTTP_POST ? RULE_WEB_METHOD_POST : RULE_WEB_METHOD_GET,
+            token, body, (uint32_t)(esp_timer_get_time() / 1000), response, sizeof(response));
+        httpd_resp_set_status(req, status == 200 ? "200 OK" : status == 409 ? "409 Conflict" :
+                                  status == 503 ? "503 Service Unavailable" : "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, response);
+    }
     if (!rule_web_authorize(web, token)) {
         httpd_resp_set_hdr(req, "Connection", "close");
         httpd_resp_set_status(req, "401 Unauthorized");
         httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"error\":\"Enter the code on the device; reopen Web UI after five failed attempts\"}");
+        httpd_resp_sendstr(req, "{\"error\":\"Request access and approve it on the StickS3\"}");
         return ESP_FAIL; /* Close without draining an untrusted request body. */
     }
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -132,19 +158,15 @@ bool rule_web_start_locked(rule_web_t *web, rule_runtime_t *runtime, rule_config
         return false;
     }
     memset(web, 0, sizeof(*web));
+    atomic_init(&web->started, false);
     web->runtime = runtime;
     web->store = store;
     web->runtime_lock_cb = lock_cb;
     web->runtime_unlock_cb = unlock_cb;
     web->runtime_lock_ctx = ctx;
 #ifdef ESP_PLATFORM
-    /* Web UI starts only after the Wi-Fi radio is enabled (RNG entropy). */
-    uint8_t random[8];
-    esp_fill_random(random, sizeof(random));
-    for (size_t i = 0; i < sizeof(random); ++i)
-        (void)snprintf(web->access_token + i * 2, 3, "%02x", random[i]);
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 17;
+    config.max_uri_handlers = 19;
     config.stack_size = 8192;
     /* Keep the stack internal: configuration handlers write NVS, which may
      * disable the flash/PSRAM cache. Total free heap includes PSRAM and does
@@ -171,6 +193,8 @@ bool rule_web_start_locked(rule_web_t *web, rule_runtime_t *runtime, rule_config
     ESP_LOGI(TAG, "HTTP server started");
     if (!register_uri(web->server, "/", HTTP_GET, web) ||
         !register_uri(web->server, "/favicon.ico", HTTP_GET, web) ||
+        !register_uri(web->server, "/api/auth", HTTP_GET, web) ||
+        !register_uri(web->server, "/api/auth", HTTP_POST, web) ||
         !register_uri(web->server, "/api/config", HTTP_GET, web) ||
         !register_uri(web->server, "/api/config", HTTP_POST, web) ||
         !register_uri(web->server, "/api/capabilities", HTTP_GET, web) ||
@@ -199,27 +223,145 @@ bool rule_web_start_locked(rule_web_t *web, rule_runtime_t *runtime, rule_config
     return true;
 }
 
-void rule_web_set_access_token(rule_web_t *web, const char *token)
+static bool rule_web_lock_runtime(const rule_web_t *web);
+static void rule_web_unlock_runtime(const rule_web_t *web);
+
+static bool auth_token_valid(const char *token)
 {
-    if (web == NULL) return;
-    memset(web->access_token, 0, sizeof(web->access_token));
-    web->failed_auth_attempts = 0;
-    if (token != NULL && strlen(token) == 16) memcpy(web->access_token, token, 16);
+    if (token == NULL || strlen(token) != RULE_WEB_AUTH_TOKEN_LEN) return false;
+    for (size_t i = 0; i < RULE_WEB_AUTH_TOKEN_LEN; ++i)
+        if (!((token[i] >= '0' && token[i] <= '9') || (token[i] >= 'a' && token[i] <= 'f'))) return false;
+    return true;
+}
+
+static rule_web_auth_session_t *auth_find(rule_web_t *web, const char *token)
+{
+    if (!auth_token_valid(token)) return NULL;
+    for (size_t i = 0; i < RULE_WEB_AUTH_SESSIONS; ++i) {
+        unsigned difference = 0;
+        for (size_t j = 0; j < RULE_WEB_AUTH_TOKEN_LEN; ++j)
+            difference |= (unsigned char)token[j] ^ (unsigned char)web->auth[i].token[j];
+        if (difference == 0 && web->auth[i].state != RULE_WEB_AUTH_NONE) return &web->auth[i];
+    }
+    return NULL;
+}
+
+static void auth_expire(rule_web_t *web, uint32_t now_ms)
+{
+    for (size_t i = 0; i < RULE_WEB_AUTH_SESSIONS; ++i) {
+        rule_web_auth_session_t *session = &web->auth[i];
+        /* Subtraction also handles the monotonic clock's 32-bit wrap. */
+        if (session->state == RULE_WEB_AUTH_PENDING &&
+            (uint32_t)(now_ms - session->requested_ms) >= RULE_WEB_AUTH_TIMEOUT_MS)
+            session->state = RULE_WEB_AUTH_EXPIRED;
+    }
+}
+
+unsigned rule_web_handle_auth(rule_web_t *web, rule_web_method_t method, const char *token,
+                              const char *body, uint32_t now_ms, char *out, size_t out_len)
+{
+    if (out == NULL || out_len == 0) return 503;
+    if (!auth_token_valid(token) || (method != RULE_WEB_METHOD_GET && method != RULE_WEB_METHOD_POST) ||
+        (method == RULE_WEB_METHOD_GET && body != NULL && body[0] != '\0') ||
+        (method == RULE_WEB_METHOD_POST && (body == NULL ||
+         (strcmp(body, "request") != 0 && strcmp(body, "cancel") != 0)))) {
+        (void)snprintf(out, out_len, "{\"error\":\"Invalid access request\"}");
+        return 400;
+    }
+    if (web == NULL || !rule_web_lock_runtime(web)) {
+        (void)snprintf(out, out_len, "{\"error\":\"Device busy; try again\"}");
+        return 503;
+    }
+    unsigned status = 200;
+    const char *error = NULL;
+    rule_web_auth_session_t *session = NULL;
+    if (!web->started) {
+        status = 503; error = "Web UI is disabled";
+    } else {
+        auth_expire(web, now_ms);
+        session = auth_find(web, token);
+        if (method == RULE_WEB_METHOD_POST && strcmp(body, "cancel") == 0) {
+            if (session != NULL) memset(session, 0, sizeof(*session));
+            session = NULL;
+        } else if (method == RULE_WEB_METHOD_POST && session == NULL) {
+            rule_web_auth_session_t *available = NULL;
+            bool pending = false;
+            for (size_t i = 0; i < RULE_WEB_AUTH_SESSIONS; ++i) {
+                rule_web_auth_state_t state = web->auth[i].state;
+                if (state == RULE_WEB_AUTH_PENDING) pending = true;
+                /* Prefer an unused slot so a browser can still read its
+                 * rejection/expiry while another requests approval. */
+                if (state == RULE_WEB_AUTH_NONE ||
+                    (available == NULL && (state == RULE_WEB_AUTH_DENIED || state == RULE_WEB_AUTH_EXPIRED)))
+                    available = &web->auth[i];
+            }
+            if (pending || available == NULL) {
+                status = 409;
+                error = pending ? "Another browser is waiting for approval; try again shortly" :
+                                  "Browser limit reached; lock another browser or reopen Web UI";
+            } else {
+                session = available;
+                memset(session, 0, sizeof(*session));
+                memcpy(session->token, token, RULE_WEB_AUTH_TOKEN_LEN);
+                session->state = RULE_WEB_AUTH_PENDING;
+                session->requested_ms = now_ms;
+                session->request_id = atomic_fetch_add(&s_auth_request_id, 1u) + 1u;
+                if (session->request_id == 0)
+                    session->request_id = atomic_fetch_add(&s_auth_request_id, 1u) + 1u;
+            }
+        }
+    }
+    const char *state = session == NULL ? "none" : session->state == RULE_WEB_AUTH_PENDING ? "pending" :
+        session->state == RULE_WEB_AUTH_APPROVED ? "approved" : session->state == RULE_WEB_AUTH_DENIED ? "denied" : "expired";
+    const int n = error != NULL ? snprintf(out, out_len, "{\"error\":\"%s\"}", error) :
+                                 snprintf(out, out_len, "{\"state\":\"%s\",\"request_id\":%lu}", state,
+                                     (unsigned long)(session != NULL ? session->request_id : 0));
+    rule_web_unlock_runtime(web);
+    return n > 0 && (size_t)n < out_len ? status : 503;
+}
+
+uint32_t rule_web_pending_auth(rule_web_t *web, uint32_t now_ms)
+{
+    if (web == NULL || !rule_web_lock_runtime(web)) return 0;
+    auth_expire(web, now_ms);
+    uint32_t id = 0;
+    if (web->started) for (size_t i = 0; i < RULE_WEB_AUTH_SESSIONS; ++i)
+        if (web->auth[i].state == RULE_WEB_AUTH_PENDING) id = web->auth[i].request_id;
+    rule_web_unlock_runtime(web);
+    return id;
+}
+
+bool rule_web_decide_auth(rule_web_t *web, uint32_t request_id, bool approve, uint32_t now_ms)
+{
+    if (web == NULL || request_id == 0 || !rule_web_lock_runtime(web)) return false;
+    auth_expire(web, now_ms);
+    bool decided = false;
+    if (web->started) for (size_t i = 0; i < RULE_WEB_AUTH_SESSIONS; ++i) {
+        rule_web_auth_session_t *session = &web->auth[i];
+        if (session->state == RULE_WEB_AUTH_PENDING && session->request_id == request_id) {
+            session->state = approve ? RULE_WEB_AUTH_APPROVED : RULE_WEB_AUTH_DENIED;
+            decided = true;
+        }
+    }
+    rule_web_unlock_runtime(web);
+    return decided;
 }
 
 bool rule_web_authorize(rule_web_t *web, const char *token)
 {
-    if (web == NULL || !web->started || web->access_token[0] == '\0' || web->failed_auth_attempts >= 5) return false;
-    unsigned difference = 0;
-    if (token == NULL || strlen(token) != 16) difference = 1;
-    else for (size_t i = 0; i < 16; ++i) difference |= (unsigned char)token[i] ^ (unsigned char)web->access_token[i];
-    if (difference != 0) { ++web->failed_auth_attempts; return false; }
-    return true;
+    if (web == NULL || !rule_web_lock_runtime(web)) return false;
+    rule_web_auth_session_t *session = auth_find(web, token);
+    const bool approved = web->started && session != NULL && session->state == RULE_WEB_AUTH_APPROVED;
+    rule_web_unlock_runtime(web);
+    return approved;
 }
 
 void rule_web_stop(rule_web_t *web)
 {
     if (web != NULL) {
+        /* Fail closed immediately, even if waiting for the runtime mutex later
+         * times out. Do not hold that mutex while httpd_stop joins handlers. */
+        web->started = false;
 #ifdef ESP_PLATFORM
         if (web->server != NULL) {
             ESP_LOGI(TAG, "stopping HTTP server");
@@ -227,8 +369,10 @@ void rule_web_stop(rule_web_t *web)
             web->server = NULL;
         }
 #endif
-        web->started = false;
-        rule_web_set_access_token(web, NULL);
+        if (rule_web_lock_runtime(web)) {
+            memset(web->auth, 0, sizeof(web->auth));
+            rule_web_unlock_runtime(web);
+        }
     }
 }
 
@@ -459,7 +603,7 @@ static bool write_action_fields(char **cursor, size_t *remaining, const rule_act
         (unsigned)action->ir_command, (unsigned)action->ir_repeat_count);
 }
 
-static bool write_rule_fields(char **cursor, size_t *remaining, const automation_rule_t *rule, bool legacy)
+static bool write_rule_fields(char **cursor, size_t *remaining, const automation_rule_t *rule)
 {
     bool ok = json_appendf(cursor, remaining, "\"id\":%lu,\"enabled\":%s,\"name\":",
               (unsigned long)rule->id, rule->enabled ? "true" : "false") &&
@@ -476,7 +620,6 @@ static bool write_rule_fields(char **cursor, size_t *remaining, const automation
         (unsigned long)rule->cooldown_ms, (unsigned long)rule->when.sustain_ms,
         rule->when.gpio.pin, gpio_profile_name(rule->when.gpio.profile), rule->when.gpio.active_low ? "true" : "false",
         (unsigned long)rule->when.gpio.debounce_ms);
-    if (legacy) return ok && json_appendf(cursor, remaining, ",") && write_action_fields(cursor, remaining, &rule->actions[0]);
     ok = ok && json_appendf(cursor, remaining, ",\"actions\":[");
     for (size_t i = 0; i < rule->action_count && ok; ++i) {
         ok = json_appendf(cursor, remaining, "%s{", i ? "," : "") &&
@@ -492,11 +635,10 @@ static bool write_config_json(const automation_config_t *config, char *out, size
     size_t remaining = out_len;
     bool ok = json_appendf(&cursor, &remaining, "{\"schema_version\":%lu,\"rule_count\":%u",
               (unsigned long)config->schema_version, (unsigned)config->rule_count);
-    if (config->rule_count > 0) ok = ok && json_appendf(&cursor, &remaining, ",") && write_rule_fields(&cursor, &remaining, &config->rules[0], true);
     ok = ok && json_appendf(&cursor, &remaining, ",\"rules\":[");
     for (size_t i = 0; i < config->rule_count && ok; ++i) {
         ok = json_appendf(&cursor, &remaining, "%s{", i ? "," : "") &&
-             write_rule_fields(&cursor, &remaining, &config->rules[i], false) && json_appendf(&cursor, &remaining, "}");
+             write_rule_fields(&cursor, &remaining, &config->rules[i]) && json_appendf(&cursor, &remaining, "}");
     }
     ok = ok && json_appendf(&cursor, &remaining, "]}");
     if (!ok) out[0] = '\0';
@@ -950,7 +1092,7 @@ static bool parse_json_rule(automation_rule_t *rule, const cJSON *object)
         for (int i = 0; i < count; ++i) if (!cJSON_IsObject(cJSON_GetArrayItem(actions, i)) ||
             !parse_json_action(&rule->actions[i], cJSON_GetArrayItem(actions, i))) return false;
         rule->action_count = (size_t)count;
-    } else if (!parse_json_action(&rule->actions[0], object)) return false;
+    } else return false;
     return true;
 }
 
@@ -983,70 +1125,9 @@ static bool make_json_config(automation_config_t *config, const char *body, cons
                 ok = ok && parse_json_rule(rule, object);
             }
         }
-    } else if (ok) {
-        ok = cJSON_GetObjectItemCaseSensitive(root, "source") != NULL && cJSON_GetObjectItemCaseSensitive(root, "action") != NULL;
-        if (config->rule_count == 0) {
-            automation_config_set_defaults(config);
-            config->rule_count = 1;
-        }
-        if (ok) ok = parse_json_rule(&config->rules[0], root);
-    }
+    } else ok = false;
     cJSON_Delete(root);
     return ok && automation_config_validate(config, NULL, 0);
-}
-
-static void make_preset_config(automation_config_t *config, const char *preset)
-{
-    automation_config_set_defaults(config);
-    if (preset == NULL || strcmp(preset, "defaults") == 0) {
-        return;
-    }
-    automation_rule_t *rule = &config->rules[0];
-    rule->enabled = true;
-    rule->action_count = 1;
-    rule->actions[0].type = RULE_ACTION_LOCAL_UI;
-    rule->actions[0].timeout_ms = 100;
-    rule->cooldown_ms = 1000;
-    rule->when.sustain_ms = 0;
-    rule->when.comparator = RULE_COMPARATOR_EQ;
-    rule->when.threshold = rule_value_bool(true);
-    if (strcmp(preset, "loud_sound_local_ui") == 0) {
-        (void)snprintf(rule->name, sizeof(rule->name), "Loud sound alert");
-        rule->when.source = RULE_SOURCE_SOUND_RMS_DBFS;
-        rule->when.comparator = RULE_COMPARATOR_GTE;
-        rule->when.threshold = rule_value_i32(-20 * 256);
-        rule->when.sustain_ms = 250;
-        rule->actions[0].type = RULE_ACTION_LOCAL_UI;
-        rule->cooldown_ms = 1000;
-    } else if (strcmp(preset, "sound_local_ui") == 0) {
-        (void)snprintf(rule->name, sizeof(rule->name), "Sound clipped alert");
-        rule->when.source = RULE_SOURCE_SOUND_CLIPPED;
-        rule->when.comparator = RULE_COMPARATOR_EQ;
-        rule->when.threshold = rule_value_bool(true);
-    } else if (strcmp(preset, "button_local_ui") == 0) {
-        (void)snprintf(rule->name, sizeof(rule->name), "KEY1 local alert");
-        rule->when.source = RULE_SOURCE_KEY1_SHORT;
-    }
-}
-
-static const char *config_preset_from_body(const char *body)
-{
-    if (body == NULL || body[0] == '\0') return NULL;
-    static const char *presets[] = {"defaults", "loud_sound_local_ui", "sound_local_ui", "button_local_ui"};
-    char requested[32] = {0};
-    cJSON *object = json_parse_object(body);
-    if (object != NULL) {
-        const cJSON *field = cJSON_GetObjectItemCaseSensitive(object, "preset");
-        const bool valid = field != NULL && object->child == field && field->next == NULL &&
-                           json_read_string(object, "preset", requested, sizeof(requested));
-        cJSON_Delete(object);
-        if (!valid) return NULL;
-    } else {
-        if (strlen(body) >= sizeof(requested)) return NULL;
-        memcpy(requested, body, strlen(body) + 1);
-    }
-    for (size_t i = 0; i < sizeof(presets) / sizeof(presets[0]); ++i) if (strcmp(requested, presets[i]) == 0) return presets[i];
-    return NULL;
 }
 
 static bool commit_web_config(const automation_config_t *config, void *ctx)
@@ -1184,7 +1265,7 @@ static bool rule_web_handle_request_unlocked(rule_web_t *web, rule_web_method_t 
             const int written = snprintf(out, out_len, "{\"ok\":false,\"error\":\"missing_mode\"}");
             return written > 0 && (size_t)written < out_len;
         }
-        if (strcmp(mode_name, "wifi") == 0 || strcmp(mode_name, "sta") == 0) {
+        if (strcmp(mode_name, "wifi") == 0) {
             mode = APP_WIFI_MODE_STA;
         } else if (strcmp(mode_name, "ap") == 0) {
             mode = APP_WIFI_MODE_AP;
@@ -1217,10 +1298,7 @@ static bool rule_web_handle_request_unlocked(rule_web_t *web, rule_web_method_t 
             return written > 0 && (size_t)written < out_len;
         }
         *config = web->runtime->engine.config;
-        const char *preset = config_preset_from_body(body);
-        if (preset != NULL) {
-            make_preset_config(config, preset);
-        } else if (!make_json_config(config, body, &web->runtime->engine.config)) {
+        if (!make_json_config(config, body, &web->runtime->engine.config)) {
             const int written = snprintf(out, out_len, "{\"error\":\"config rejected\"}");
             free(config);
             return written > 0 && (size_t)written < out_len;
@@ -1256,7 +1334,7 @@ static bool rule_web_handle_request_unlocked(rule_web_t *web, rule_web_method_t 
         (void)snprintf(event.rule_name, sizeof(event.rule_name), "%s", rule->name);
         bool queued = action_enqueue(&web->runtime->dispatcher, &event);
         if (queued) web->runtime->engine.next_event_sequence++;
-        /* Compatibility route: this executes one action, not rule evaluation. */
+        /* Explicit first-action test; no condition evaluation or fan-out. */
         const int written = snprintf(out, out_len,
             "{\"ok\":%s,\"queued\":%s,\"mode\":\"first_action\",\"evaluates_rule\":false}",
             queued ? "true" : "false", queued ? "true" : "false");

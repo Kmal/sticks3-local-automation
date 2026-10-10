@@ -36,11 +36,11 @@ This inventory is generated from direct source inspection of `src/**/*.c`, `src/
 | `rule_engine.c` | default | yes | Rule condition evaluation, false-to-true firing, sustain, cooldown, action fan-out, and sequence assignment. |
 | `rule_runtime.c` | default | yes | Runtime bridge from button/GPIO/BLE/Wi-Fi/sound facts to rule engine and action dispatcher; the default sound service feeds live metrics through this existing path. |
 | `rule_types.c` | default | yes | Rule defaults, validation, source/action names, safe GPIO/capability checks, and binary config serialization. |
-| `rule_web.c` | default | yes | On-demand HTTP Web UI/API implementation for config, status, time, Wi-Fi, capabilities, test actions, GPIO, and HAT probe; runtime reads and mutations use the application's rule mutex. |
+| `rule_web.c` | default | yes | On-demand HTTP Web UI/API implementation for config, status, time, Wi-Fi, capabilities, test actions, GPIO, and HAT probe; runtime reads, mutations and bounded browser-approval sessions use the application's rule mutex; host tests cover approval, denial, expiry, isolation, cancellation and revocation. |
 | `sound_level_service.c` | default via sound config | yes | Demand-driven capture task/service source linked by default sound-level trigger builds; it reads microphone samples, computes metrics, and feeds sound facts while enabled sound rules or Web UI telemetry demand exist. |
 | `status_lcd.c` | default | no | Optional LCD bring-up/render task path behind `CONFIG_APP_STATUS_UI_LCD`; failures are non-fatal. |
-| `status_ui.c` | default | no | Status UI task, active-low KEY1/KEY2 polling, global input queueing, focused keyboard/scan/menu/idle dispatch, launcher/menu integration, toasts, service enablement, and automation config callbacks. |
-| `status_ui_input_map.c` | default | yes | Pure helper mapping physical KEY1/KEY2 gestures to global `STATUS_UI_INPUT_*` values; KEY1 long remains outside this map to preserve the idle menu-open exception. |
+| `status_ui.c` | default | no | Status UI task, active-low KEY1/KEY2 polling, global input queueing, focused approval/keyboard/scan/menu/idle dispatch (approval dispatcher covered through the extracted-function host test), launcher/menu integration, toasts, service enablement, and automation config callbacks. |
+| `status_ui_input_map.c` | default | yes | Pure helper mapping physical KEY1/KEY2 gestures to global `STATUS_UI_INPUT_*` values; KEY1 long remains outside this map to preserve the idle menu-open exception; also maps approval-prompt inputs to approve/reject decisions. |
 | `transport_ble_gatt.c` | conditional | no | Custom BLE GATT status/rule-event transport compiled when `CONFIG_APP_TRANSPORT_BLE_GATT_RULE_EVENTS=y`. |
 | `trigger_gpio.c` | default | yes | Safe GPIO digital/edge trigger initialization and polling with debounce and source-key generation. |
 | `trigger_hat.c` | default | yes | HAT source probe path deliberately returns unsupported. |
@@ -55,7 +55,7 @@ This inventory is generated from direct source inspection of `src/**/*.c`, `src/
 | `ui_keyboard.c` | default | yes | 9-key overlay input model for SSID/password/AP/time fields, including explicit cancel result support and menu-edit cancel metadata coverage. |
 | `ui_model.c` | default | yes | Menu/application model for Wi-Fi, AP, Bluetooth, field-specific automation edits through the application-owned transaction backend, Web UI service state, and time settings. |
 | `ui_nav.c` | default | yes | Menu graph/navigation state machine for the status UI. |
-| `ui_render.c` | default | no | LCD rendering of status bar, menus, Wi-Fi/AP/BLE/automation/settings screens, toasts, and keyboard overlay. |
+| `ui_render.c` | default | no | LCD rendering of status bar, menus, Wi-Fi/AP/BLE/automation/settings screens, device browser-approval prompts, toasts, and keyboard overlay; the focused extracted pop-up renderer has host layout coverage, while the full LCD module remains untested on host. |
 
 
 ## Hardware automation facts inventory

@@ -1,27 +1,33 @@
 const $=id=>document.getElementById(id);
 let deviceToken='', unlocked=false, pending=0, activeView='automations', loaded={}, configSnapshot=null, editIndex=-1;
+let authWaiting=false, authTimer=0, authAttempt=0;
 let caps={sources:[], actions:[], gpio_profiles:[], hat_sources:[]};
 function banner(kind, msg) { $('banner').className='banner '+(kind||'info'); $('banner').textContent=msg||''; }
 function dump(id, d) { $(id).textContent=typeof d==='string'?d:JSON.stringify(d, null, 2)||'Operation complete.'; }
 function controls() {
-  document.querySelectorAll('button').forEach(b=>b.disabled=b.hasAttribute('popovertarget')?false:pending>0||(!unlocked&&b.id!=='unlock_device'));
+  document.querySelectorAll('button').forEach(b=>b.disabled=b.hasAttribute('popovertarget')?false:pending>0||(!unlocked&&b.id!=='request_access'));
+  $('request_access').disabled=pending>0||authWaiting;
+  $('cancel_access').disabled=pending>0||!deviceToken;
+  $('cancel_access').hidden=!deviceToken;
   $('new_automation').disabled=pending>0||!unlocked||(configSnapshot&&configSnapshot.rules.length>=8);
 }
 function busy(on) { pending += on?1:-1; controls(); }
 function session(on) {
   unlocked=on;
-  $('unlock_panel').hidden=on;
+  $('auth_panel').hidden=on;
+  $('workspace').hidden=!on;
+  document.body.classList.toggle('auth',!on);
   document.querySelectorAll('.controls').forEach(f=>f.disabled=!on);
+  if(on&&$('connection_pill').textContent==='Locked') $('connection_pill').textContent='Approved';
+  if(!on) { authMessage('Request access to continue.'); ++authAttempt; clearTimeout(authTimer); authWaiting=false; try { sessionStorage.removeItem('stick-auth'); } catch(e) {} deviceToken=''; loaded={}; configSnapshot=null; if($('rule_editor').open) $('rule_editor').close(); renderRules(); ['wifi_password','ap_password','http_bearer_token','config_json'].forEach(id=>$(id).value=''); $('connection_pill').textContent='Locked'; }
   controls();
-  if(on&&$('connection_pill').textContent==='Locked') $('connection_pill').textContent='Unlocked';
-  if(!on) { deviceToken=''; loaded={}; configSnapshot=null; if($('rule_editor').open) $('rule_editor').close(); renderRules(); ['wifi_password','ap_password','http_bearer_token'].forEach(id=>$(id).value=''); $('connection_pill').textContent='Locked'; }
 }
-async function api(u, o) {
-  if(!/^[a-f0-9]{16}$/.test(deviceToken)) throw new Error('Device code required');
+async function api(u, o, token=deviceToken) {
+  if(!/^[a-f0-9]{32}$/.test(token)||(!unlocked&&u!=='/api/auth')) throw new Error('Device approval required');
   busy(true);
   try {
-    const r=await fetch(u, Object.assign({headers:{'Content-Type':'application/json', 'X-Device-Token':deviceToken}, signal:AbortSignal.timeout(20000)}, o||{}));
-    if(r.status===401) session(false);
+    const r=await fetch(u, Object.assign({headers:{'Content-Type':'application/json', 'X-Device-Token':token}, signal:AbortSignal.timeout(20000)}, o||{}));
+    if(r.status===401&&token===deviceToken) session(false);
     const t=await r.text();
     let d;
     try { d=t?JSON.parse(t):{}; } catch (e) { throw new Error('Invalid device response. Refresh to retry.'); }
@@ -41,7 +47,7 @@ function fill() {
   ['source','action','gpio_profile','hat_source'].forEach(i=>$(i).replaceChildren());
   (caps.sources||[]).forEach(v=>opt($('source'), v));
   (caps.actions||[]).forEach(v=>opt($('action'), v));
-  (caps.gpio_profiles||[]).forEach(g=>opt($('gpio_profile'), g.name||g, g.supported===false?g.name+' (disabled)':g.name||g));
+  (caps.gpio_profiles||[]).forEach(g=>opt($('gpio_profile'), g.name, g.supported===false?g.name+' (disabled)':g.name));
   (caps.hat_sources||[]).forEach(h=>opt($('hat_source'), h.name, h.name+(h.supported?' (present)':' ('+h.reason+')')));
 }
 async function capabilities() { if(!caps.sources.length) { caps=await api('/api/capabilities'); fill(); dump('capabilities', caps); } }
@@ -65,8 +71,8 @@ function friendly(value) { return String(value||'—').replace(/[._]/g, ' '); }
 function renderRules() {
   const root=$('rule_list'); root.replaceChildren();
   const rules=configSnapshot?configSnapshot.rules:[];
-  $('rule_count').textContent=configSnapshot?rules.length+' of 8 automations':'Unlock to load saved automations.';
-  if(!rules.length) { const p=document.createElement('p'); p.className='empty'; p.textContent=configSnapshot?'No automations yet. Create your first rule.':'Unlock to view automations.'; root.appendChild(p); }
+  $('rule_count').textContent=configSnapshot?rules.length+' of 8 automations':'Waiting for device approval.';
+  if(!rules.length) { const p=document.createElement('p'); p.className='empty'; p.textContent=configSnapshot?'No automations yet. Create your first rule.':'Waiting for device approval.'; root.appendChild(p); }
   rules.forEach((r, i)=>{
     const row=document.createElement('button'); row.className='rule-row'; row.type='button';
     const count=r.action_count||(r.actions||[]).length;
@@ -121,7 +127,7 @@ function editedConfig() {
   r.actions=[action, ...((old&&old.actions.slice(1))||[])];
   if(old) rules[editIndex]=r;
   else { if(rules.length>=8) throw new Error('The device supports up to 8 automations.'); let id=1; while(rules.some(r=>r.id===id)) id++; r.id=id; rules.push(r); }
-  return {schema_version:configSnapshot.schema_version||1, rules};
+  return {schema_version:configSnapshot.schema_version, rules};
 }
 function renderNetworks(ns) {
   const root=$('wifi_networks'); root.replaceChildren();
@@ -162,13 +168,13 @@ async function refresh() {
   loaded[view]=true;
   if(activeView!==view&&!loaded[activeView]) await refresh();
 }
-function navigate() {
+function navigate(load=true) {
   const requested=window.location.hash.slice(1);
-  activeView=['settings','network','device','diagnostics'].includes(requested)?'settings':'automations';
+  activeView=requested==='settings'?'settings':'automations';
   document.querySelectorAll('[data-page]').forEach(p=>p.hidden=p.dataset.page!==activeView);
   document.querySelectorAll('[data-view]').forEach(a=>{ if(a.dataset.view===activeView) a.setAttribute('aria-current','page'); else a.removeAttribute('aria-current'); });
   $('page_title').textContent=activeView==='settings'?'Settings':'Automations';
-  if(unlocked&&!pending&&!loaded[activeView]) op(refresh, 'Loading…');
+  if(load&&unlocked&&!pending&&!loaded[activeView]) op(refresh, 'Loading…');
 }
 async function setWifiMode(mode) { await api('/api/wifi/mode', {method:'POST',body:JSON.stringify({mode})}); await wifiStatus(); }
 $('tab_wifi').onclick=()=>showNetPanel('wifi');
@@ -200,12 +206,51 @@ $('rule_editor').onclose=()=>{ editIndex=-1; $('http_bearer_token').value=''; };
 $('rule_editor').oncancel=e=>{ if(pending) e.preventDefault(); };
 $('device_settings').ontoggle=()=>{ if(unlocked&&$('device_settings').open) op(timeStatus, 'Loading time…'); };
 $('diagnostic_settings').ontoggle=()=>{ if(unlocked&&$('diagnostic_settings').open) op(async ()=>{ await capabilities(); dump('status', await api('/api/status')); }, 'Loading diagnostics…'); };
-$('unlock_form').onsubmit=e=>{ e.preventDefault(); return op(async ()=>{ deviceToken=$('device_code').value.trim().toLowerCase(); await refresh(); session(true); $('device_code').value=''; }, 'Unlocking…'); };
-$('lock_device').onclick=()=>{ session(false); $('device_code').focus(); banner('info', 'Locked in this browser. Enter the device code to continue.'); };
+function authMessage(text) { $('auth_status').textContent=text; }
+function rememberAuth() { try { sessionStorage.setItem('stick-auth',deviceToken); } catch(e) {} }
+async function authResult(d, attempt) {
+  if(attempt!==authAttempt) return;
+  if(d.state==='approved') {
+    authWaiting=false; clearTimeout(authTimer); session(true);
+    activeView='automations'; window.history.replaceState(null,'','#automations'); navigate(false);
+    $('page_title').tabIndex=-1; $('page_title').focus();
+    await op(refresh,'Loading automations…');
+  } else if(d.state==='pending') {
+    authMessage('Request #'+d.request_id+': waiting for approval. Press KEY1 on your StickS3; KEY2 rejects.');
+    authTimer=setTimeout(()=>checkAccess(attempt),1000);
+  } else {
+    session(false); authMessage(d.state==='denied'?'Request rejected on the StickS3.':d.state==='expired'?'Request expired. Request access again.':'Request access to continue.');
+  }
+  controls();
+}
+async function checkAccess(attempt) {
+  if(attempt!==authAttempt) return;
+  try { await authResult(await api('/api/auth'),attempt); }
+  catch(e) { if(attempt===authAttempt) { authWaiting=false; controls(); authMessage(e.message+' Request access to retry, or cancel.'); } }
+}
+async function requestAccess() {
+  if(authWaiting) return;
+  const previous=deviceToken; session(false); banner();
+  deviceToken=previous||Array.from(crypto.getRandomValues(new Uint8Array(16)),v=>v.toString(16).padStart(2,'0')).join('');
+  rememberAuth(); authWaiting=true; const attempt=authAttempt; controls(); authMessage('Sending access request…');
+  try { await authResult(await api('/api/auth',{method:'POST',body:'request'}),attempt); }
+  catch(e) { if(attempt===authAttempt) { authWaiting=false; controls(); authMessage(e.message); } }
+}
+async function endAccess() {
+  const token=deviceToken; session(false); banner(); authMessage('Request access to continue.');
+  if(token) try { await api('/api/auth',{method:'POST',body:'cancel'},token); }
+  catch(e) { authMessage('Access closed in this browser. Device cancellation failed; pending requests expire after 60 seconds.'); }
+  $('request_access').focus();
+}
+$('request_access').onclick=requestAccess;
+$('cancel_access').onclick=$('lock_device').onclick=endAccess;
 if(typeof window!=='undefined') {
   const drawer=$('mobile_nav'), mobile=window.matchMedia('(max-width:650px)'), actions=$('refresh').parentElement;
   const layout=()=>{ if(drawer.matches(':popover-open')) drawer.hidePopover(); if(mobile.matches) { drawer.setAttribute('popover','auto'); drawer.append($('connection_pill'),$('lock_device')); } else { drawer.removeAttribute('popover'); actions.prepend($('connection_pill')); actions.append($('lock_device')); } };
   mobile.addEventListener('change', layout); layout();
   drawer.onclick=e=>{ if(e.target.closest('a')&&mobile.matches) drawer.hidePopover(); };
-  window.addEventListener('hashchange', navigate); navigate(); session(false);
+  window.addEventListener('hashchange', navigate);
+  let saved=''; try { saved=sessionStorage.getItem('stick-auth')||''; } catch(e) {}
+  navigate(); session(false);
+  if(/^[a-f0-9]{32}$/.test(saved)) { deviceToken=saved; rememberAuth(); authWaiting=true; controls(); authMessage('Checking device approval…'); checkAccess(authAttempt); }
 }

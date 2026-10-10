@@ -17,6 +17,7 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 
 #include "action_http.h"
@@ -634,7 +635,6 @@ static void app_web_ui_service_changed(bool enabled, void *ctx)
     if (enabled) {
         if (!s_rule_web.started && rule_web_start_locked(&s_rule_web, &s_rule_runtime, &s_rule_store,
                                                        app_rule_web_runtime_lock, app_rule_web_runtime_unlock, s_rule_mutex)) {
-            status_ui_set_web_access_code(s_rule_web.access_token);
             rule_web_set_config_changed_callback(&s_rule_web, app_rule_web_config_changed_cb, NULL);
 #if CONFIG_APP_SOUND_LEVEL_TRIGGERS
             app_sound_level_demand_set_telemetry(&s_sound_level_demand, true);
@@ -650,7 +650,6 @@ static void app_web_ui_service_changed(bool enabled, void *ctx)
         }
     } else {
         if (stopping) {
-            status_ui_set_web_access_code(NULL);
 #if CONFIG_APP_SOUND_LEVEL_TRIGGERS
             app_sound_level_demand_set_telemetry(&s_sound_level_demand, false);
 #endif
@@ -661,6 +660,20 @@ static void app_web_ui_service_changed(bool enabled, void *ctx)
         xSemaphoreGive(s_rule_mutex);
     }
 
+}
+
+static uint32_t app_web_auth_pending(void *ctx)
+{
+    (void)ctx;
+    if (!s_rule_runtime_ready) return 0;
+    return rule_web_pending_auth(&s_rule_web, (uint32_t)(esp_timer_get_time() / 1000));
+}
+
+static void app_web_auth_decide(uint32_t request_id, bool approve, void *ctx)
+{
+    (void)ctx;
+    if (s_rule_runtime_ready)
+        (void)rule_web_decide_auth(&s_rule_web, request_id, approve, (uint32_t)(esp_timer_get_time() / 1000));
 }
 
 static void app_idle_forever(void)
@@ -682,6 +695,8 @@ void app_main(void)
         .key1_pressed = key1_pressed_cb,
         .key2_pressed = key2_pressed_cb,
         .service_enabled_changed = app_web_ui_service_changed,
+        .web_auth_pending = app_web_auth_pending,
+        .web_auth_decide = app_web_auth_decide,
     };
 
     ESP_LOGI(TAG, "app_main: NVS init start");

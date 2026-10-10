@@ -43,6 +43,16 @@ int main(void)
 {
     test_physical_gestures_map_to_global_inputs();
     test_key1_long_stays_out_of_global_input_mapping();
+    bool approve = false;
+    ASSERT_TRUE(status_ui_web_auth_decision(STATUS_UI_INPUT_SELECT, &approve));
+    ASSERT_TRUE(approve);
+    for (int input = STATUS_UI_INPUT_NEXT; input <= STATUS_UI_INPUT_BACK; ++input) {
+        approve = true;
+        ASSERT_TRUE(status_ui_web_auth_decision((status_ui_input_t)input, &approve));
+        ASSERT_TRUE(!approve);
+    }
+    ASSERT_TRUE(!status_ui_web_auth_decision((status_ui_input_t)99, &approve));
+    ASSERT_TRUE(!status_ui_web_auth_decision(STATUS_UI_INPUT_SELECT, NULL));
     puts("status_ui_input_map tests passed");
     return 0;
 }

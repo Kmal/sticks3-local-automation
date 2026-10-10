@@ -174,7 +174,7 @@ static void ui_render_wifi_result(const ui_runtime_t *ui, const ui_wifi_flow_sta
     int y = UI_BODY_Y;
     snprintf(line, sizeof(line), "SSID: %s", wifi != NULL && wifi->ssid[0] ? wifi->ssid : "-");
     ui_text_put_line(DISPLAY_TEXT_REGION_BODY_ROW_0, UI_LEFT_PAD, y, UI_LCD_W - UI_LEFT_PAD - UI_RIGHT_PAD, line, UI_COLOR_TEXT, DISPLAY_TEXT_FIT_WRAP); y += UI_LINE_H;
-    snprintf(line, sizeof(line), "%s", ui->web_access_code[0] ? ui->web_access_code : (wifi != NULL && wifi->last_error[0] ? wifi->last_error : "Connected and saved"));
+    snprintf(line, sizeof(line), "%s", wifi != NULL && wifi->last_error[0] ? wifi->last_error : "Connected and saved");
     ui_text_put_line(DISPLAY_TEXT_REGION_BODY_ROW_1, UI_LEFT_PAD, y, UI_LCD_W - UI_LEFT_PAD - UI_RIGHT_PAD, line, wifi != NULL && wifi->web_url[0] ? UI_COLOR_OK : UI_COLOR_WARN, DISPLAY_TEXT_FIT_WRAP);
     y += UI_LINE_H;
     ui_text_put_line(DISPLAY_TEXT_REGION_BODY_ROW_2, UI_LEFT_PAD, y, UI_LCD_W - UI_LEFT_PAD - UI_RIGHT_PAD,
@@ -199,7 +199,7 @@ static void ui_render_ap_url(const ui_runtime_t *ui)
     ui_text_put_line(DISPLAY_TEXT_REGION_BODY_ROW_2, UI_LEFT_PAD, y, UI_LCD_W - UI_LEFT_PAD - UI_RIGHT_PAD, line, UI_COLOR_OK, DISPLAY_TEXT_FIT_MARQUEE); y += UI_LINE_H;
     snprintf(line, sizeof(line), "Channel: %u", (unsigned)ui->ap.channel);
     ui_text_put_line(DISPLAY_TEXT_REGION_BODY_ROW_3, UI_LEFT_PAD, y, UI_LCD_W - UI_LEFT_PAD - UI_RIGHT_PAD, line, UI_COLOR_TEXT, DISPLAY_TEXT_FIT_ONE_LINE); y += UI_LINE_H;
-    snprintf(line, sizeof(line), "Code: %s", ui->web_access_code[0] ? ui->web_access_code : "unavailable");
+    snprintf(line, sizeof(line), "Approve browser on device");
     ui_text_put_line(DISPLAY_TEXT_REGION_BODY_ROW_4, UI_LEFT_PAD, y, UI_LCD_W - UI_LEFT_PAD - UI_RIGHT_PAD, line, ui->ap.started ? UI_COLOR_OK : UI_COLOR_WARN, DISPLAY_TEXT_FIT_MARQUEE);
 }
 
@@ -419,6 +419,23 @@ void ui_render_screen(const ui_runtime_t *ui, const ui_screen_def_t *screen)
     ui_render_bottom_hints("K1 SEL K2 NEXT 2x PREV HOLD BACK");
 }
 
+
+void ui_render_web_auth_popup(uint32_t request_id)
+{
+    const int x = 4, width = UI_LCD_W - 8;
+    const int height = 8 * UI_LINE_H + 8;
+    const int top = (UI_LCD_H - height) / 2;
+    status_lcd_fill_rect(x, top, width, height, UI_COLOR_WARN);
+    status_lcd_fill_rect(x + 1, top + 1, width - 2, height - 2, 0x1082);
+    const int text_x = x + 4, text_width = width - 8;
+    char request[32];
+    snprintf(request, sizeof(request), "Request #%lu", (unsigned long)request_id);
+    const char *lines[] = {"Web UI access", request, "KEY1: approve", "KEY2: reject", "Expires after 60s"};
+    for (size_t i = 0; i < sizeof(lines) / sizeof(lines[0]); ++i)
+        ui_text_put_box(ui_body_row_region(i), text_x, top + 8 + (int)i * 24,
+            text_width, 20, lines[i], i == 2 ? UI_COLOR_OK : UI_COLOR_TEXT,
+            DISPLAY_TEXT_FIT_WRAP, DISPLAY_TEXT_ALIGN_LEFT, DISPLAY_TEXT_PRIORITY_OVERLAY);
+}
 
 void ui_render_keyboard_overlay(const ui_keyboard_state_t *kb)
 {

@@ -14,8 +14,9 @@ module/gesture extraction items that the original plan explicitly allowed to be
 left for a follow-up. Documentation and comments were updated to describe the new
 input flow and the UI-state-blind physical gesture boundary.
 
-The one validation gap is environmental: the current container still does not
-provide ESP-IDF, so `idf.py build` cannot be executed here.
+The original input-refactor review lacked an ESP-IDF environment. The current
+2026-10-10 follow-up builds with ESP-IDF v6.1 for ESP32-S3 successfully; physical
+StickS3 button/display validation remains pending.
 
 ## Official/reference material checked
 
@@ -68,6 +69,7 @@ machine-readable board manifest where applicable.
 | Physical dispatchers do not inspect keyboard/menu/scan foreground state. | Done | The short/single/double/long dispatchers no longer call keyboard/menu handlers or inspect UI focus; the KEY1-long exception delegates to a UI-owned helper instead of reading `s_ui.menu_active` in GPIO polling. |
 | Preserve KEY1 long menu-open behavior. | Done | KEY1 long remains the explicit exception, but GPIO polling now delegates the UI-state check/open to `status_ui_handle_key1_long()` so the physical polling path stays UI-state blind. |
 | Move idle KEY1/KEY2 callback behavior into idle global input handling. | Done | Idle consumer sets deferred callback effects for `SELECT` and `NEXT`. |
+| Pending browser authorization takes focus before keyboard, scan, menu, or idle input. | Done | The request ID actually rendered by the LCD binds the device decision. KEY1 short approves; KEY2 single/double/long rejects; KEY1 long is ignored. Approval effects call the owner outside the UI spinlock. |
 | Collect side effects in an input-effects struct and apply them after routing. | Done | `status_ui_input_effects_t` plus `status_ui_apply_input_effects()`. |
 | Make `status_ui_handle_input()` the global entry point. | Done | It dispatches focused input and then applies collected effects. |
 | Dispatch focused input by keyboard, scan, menu, idle priority. | Done | `status_ui_dispatch_focused_input()`. |
@@ -112,7 +114,13 @@ Implemented host coverage:
 
 - `tests/host/test_status_ui_input_map.c` verifies the physical gesture to
   global input mapping for KEY1 short, KEY2 single, KEY2 double, and KEY2 long,
-  and verifies KEY1 long remains outside that mapping.
+  and verifies KEY1 long remains outside that mapping. It also verifies the
+  authorization decision mapping.
+- `tests/tools/test_web_auth_input.py` compiles the production input dispatcher
+  and approval effects with owner/menu spies, checking prompt focus and
+  rejection of approval before the matching request is rendered. It compiles
+  the production pop-up renderer with display-text helpers to check that all
+  instructions fit the 135×240 display, including the largest request ID.
 - `tests/host/test_ui_keyboard.c` verifies keyboard cancel commits pending
   multi-tap state and records cancel metadata explicitly.
 
@@ -125,5 +133,5 @@ Validation commands used for this review:
 
 Known validation limitation:
 
-- The full firmware build could not be run in the current container because the
-  ESP-IDF `idf.py` command is not installed.
+- The default ESP32-S3 firmware now builds with ESP-IDF v6.1. Host input/layout
+  tests and the build do not establish physical display or button behavior.

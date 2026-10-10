@@ -16,11 +16,14 @@ class Element {
 }
 const nodes = new Map();
 const document = {
+  body:{classList:{toggle() {}}},
   getElementById(id) { if (!nodes.has(id)) nodes.set(id, new Element()); return nodes.get(id); },
   createElement(tag) { return new Element(tag); },
   querySelectorAll() { return []; },
 };
-const context = vm.createContext({document, AbortSignal, fetch: () => new Promise(() => {})});
+const storage=new Map();
+const sessionStorage={setItem:(k,v)=>storage.set(k,v),getItem:k=>storage.get(k),removeItem:k=>storage.delete(k)};
+const context = vm.createContext({document, AbortSignal, sessionStorage, setTimeout, clearTimeout, fetch: () => new Promise(() => {})});
 vm.runInContext(fs.readFileSync(path.join(__dirname, '../../webui/app.js'), 'utf8'), context);
 document.getElementById('threshold').value = 'true';
 const hostile = '<img src=x onerror=alert(1)>';
@@ -55,11 +58,11 @@ assert(!html.includes("Test First Rule"));
     requests.push({url, options});
     return {ok:true, text:async()=>'{"ok":true}'};
   };
-  await assert.rejects(vm.runInContext("api('/api/status')", context), /Device code required/);
+  await assert.rejects(vm.runInContext("api('/api/status')", context), /Device approval required/);
   assert.equal(requests.length, 0);
-  vm.runInContext("deviceToken='0123456789abcdef'", context);
+  vm.runInContext("deviceToken='0123456789abcdef0123456789abcdef'; session(true)", context);
   await vm.runInContext("api('/api/status')", context);
-  assert.equal(requests[0].options.headers['X-Device-Token'], '0123456789abcdef');
+  assert.equal(requests[0].options.headers['X-Device-Token'], '0123456789abcdef0123456789abcdef');
   requests = [];
   context.fetch = async (url, options) => {
     requests.push({url, options});
@@ -82,10 +85,12 @@ assert(!html.includes("Test First Rule"));
   await vm.runInContext('activeView="settings"; refresh()', context);
   assert.deepEqual(requests.map(r => r.url), ['/api/wifi/status']);
   assert.equal(requests[0].options.signal instanceof AbortSignal, true);
-  context.fetch = async () => ({ok:false, status:401, text:async()=>'{"error":"Expired code"}'});
-  await assert.rejects(vm.runInContext("api('/api/status')", context), /Expired code/);
+  document.getElementById('config_json').value='raw imported credentials';
+  context.fetch = async () => ({ok:false, status:401, text:async()=>'{"error":"Approval expired"}'});
+  await assert.rejects(vm.runInContext("api('/api/status')", context), /Approval expired/);
   assert.equal(vm.runInContext('deviceToken', context), '');
-  assert.equal(document.getElementById('unlock_panel').hidden, false);
+  assert.equal(document.getElementById('auth_panel').hidden, false);
+  assert.equal(document.getElementById('config_json').value, '', 'revocation clears imported credentials');
   const fixture = {schema_version:1,rules:[
     {id:4,name:hostile,source:'key1.short',enabled:false,actions:[{action:'local_ui'}]},
     {id:8,name:'Second',source:'key2.short',enabled:true,source_key:'key2',cooldown_ms:4321,actions:[{action:'http_post',http_url:'https://example.com',http_bearer_token:'masked',action_timeout_ms:3000},{action:'local_ui'}]}
@@ -115,4 +120,73 @@ assert(!html.includes("Test First Rule"));
   assert.equal(fixture.rules.length,2,'editing must not mutate the loaded configuration');
   console.log('multi-rule creation, isolated editing, and token preservation tests passed');
   console.log('webui session header and save acknowledgement tests passed');
+  const timers = new Map(); let timerId=0;
+  context.setTimeout=callback=>{ timers.set(++timerId,callback); return timerId; };
+  context.clearTimeout=id=>timers.delete(id);
+  context.crypto=require('node:crypto').webcrypto;
+  context.window={location:{hash:''},history:{replaceState(_state,_title,hash) { context.window.location.hash=hash; }}};
+  let state='pending', busyRequest=false;
+  context.fetch=async (url,options)=>{
+    requests.push({url,options});
+    if(url==='/api/auth') return {ok:!busyRequest,status:busyRequest?409:200,text:async()=>JSON.stringify(busyRequest?{error:'Another browser is waiting'}:{state:options.body==='cancel'?'none':state,request_id:1})};
+    return {ok:true,text:async()=>JSON.stringify({rules:[]})};
+  };
+  vm.runInContext('session(false)',context); requests=[];
+  await assert.rejects(vm.runInContext("api('/api/config')",context),/Device approval required/);
+  assert.equal(requests.length,0);
+  await document.getElementById('request_access').onclick();
+  assert.deepEqual(requests.map(r=>r.url),['/api/auth']);
+  const token=vm.runInContext('deviceToken',context);
+  assert.match(token,/^[a-f0-9]{32}$/);
+  assert.equal(requests[0].options.body,'request');
+  assert.equal(document.getElementById('workspace').hidden,true);
+  assert.equal(document.getElementById('request_access').disabled,true);
+  assert.equal(document.getElementById('cancel_access').hidden,false);
+  assert.match(document.getElementById('auth_status').textContent,/waiting for approval/);
+  assert.equal(storage.get('stick-auth'),token);
+  assert.equal(timers.size,1);
+  await assert.rejects(vm.runInContext("api('/api/status')",context),/Device approval required/);
+  state='approved'; requests=[];
+  await vm.runInContext('checkAccess(authAttempt)',context);
+  assert.deepEqual(requests.map(r=>r.url),['/api/auth','/api/config?view=list']);
+  assert.equal(requests[1].options.headers['X-Device-Token'],token);
+  assert.equal(context.window.location.hash,'#automations');
+  assert.equal(document.getElementById('auth_panel').hidden,true);
+  assert.equal(document.getElementById('workspace').hidden,false);
+  assert.equal(timers.size,0,'approval stops authentication polling');
+  requests=[];
+  await document.getElementById('lock_device').onclick();
+  assert.deepEqual(requests.map(r=>r.url),['/api/auth']);
+  assert.equal(requests[0].options.body,'cancel');
+  assert.equal(requests[0].options.headers['X-Device-Token'],token);
+  assert.equal(document.getElementById('workspace').hidden,true);
+  assert.equal(vm.runInContext('deviceToken',context),'');
+  assert.equal(storage.has('stick-auth'),false);
+  state='pending'; await document.getElementById('request_access').onclick();
+  state='denied'; await vm.runInContext('checkAccess(authAttempt)',context);
+  assert.match(document.getElementById('auth_status').textContent,/rejected/);
+  assert.equal(document.getElementById('request_access').disabled,false);
+  assert.equal(document.getElementById('workspace').hidden,true);
+  state='pending'; await document.getElementById('request_access').onclick();
+  state='expired'; await vm.runInContext('checkAccess(authAttempt)',context);
+  assert.match(document.getElementById('auth_status').textContent,/expired/);
+  assert.equal(timers.size,0,'expiry stops authentication polling');
+  busyRequest=true; await document.getElementById('request_access').onclick();
+  assert.match(document.getElementById('auth_status').textContent,/Another browser/);
+  assert.equal(document.getElementById('request_access').disabled,false);
+  const retryToken=vm.runInContext('deviceToken',context);
+  busyRequest=false; state='pending'; await document.getElementById('request_access').onclick();
+  assert.equal(vm.runInContext('deviceToken',context),retryToken,'network/busy retries reuse the same private request');
+  let finishPoll;
+  context.fetch=async (url,options)=>{
+    if(options.method==='POST') return {ok:true,text:async()=>'{"state":"none"}'};
+    return new Promise(resolve=>{ finishPoll=resolve; });
+  };
+  const late=vm.runInContext('checkAccess(authAttempt)',context);
+  await document.getElementById('cancel_access').onclick();
+  finishPoll({ok:true,text:async()=>'{"state":"approved"}'}); await late;
+  assert.equal(document.getElementById('workspace').hidden,true,'late approval cannot resurrect a cancelled browser session');
+  assert.equal(vm.runInContext('unlocked',context),false);
+  assert.equal(timers.size,0);
+  console.log('device approval, denial, expiry, busy retry, revocation and late-response tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

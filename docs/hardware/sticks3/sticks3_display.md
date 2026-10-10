@@ -6,6 +6,8 @@ When validating the L3B/LCD fix on UART, the expected M5PM1 lines include `activ
 
 Display-related pins are internal board resources. GPIO39 is LCD MOSI and must not be configured as a status button, user GPIO, rule input, or rule output.
 
+A pending Web UI browser request shows an authorization pop-up over the current LCD screen with its request number and KEY1 approve / KEY2 reject instructions. It hides keyboard overlays and toasts until the request is decided, cancelled or expires; the underlying navigation state is preserved. Wi-Fi/AP URL screens no longer display a manual access code.
+
 ## Sources
 
 - M5Stack StickS3 product page specifications and pin map for ST7789P3, 135x240 resolution, and LCD GPIOs: https://docs.m5stack.com/en/core/StickS3

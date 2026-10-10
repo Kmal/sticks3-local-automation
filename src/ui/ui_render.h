@@ -9,6 +9,7 @@ extern "C" {
 #endif
 
 void ui_render_screen(const ui_runtime_t *ui, const ui_screen_def_t *screen);
+void ui_render_web_auth_popup(uint32_t request_id);
 void ui_render_toast(const ui_toast_t *toast);
 void ui_render_keyboard_overlay(const ui_keyboard_state_t *kb);
 
