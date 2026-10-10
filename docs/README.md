@@ -222,6 +222,8 @@ LCD flow uses the onboard buttons when the menu is open:
 | KEY2 long | Back. |
 | KEY1 long from the idle status view | Open `Main`. |
 
+KEY2 double-click allows up to 500 ms between the two debounced releases. A single click is dispatched after this window expires, adding about half a second before moving next.
+
 When the 9-key input overlay is active, the LCD shows a 4x4 phone-style pad (`1`, `2ABC`, `3DEF`, `-` / `4GHI`, `5JKL`, `6MNO`, `.` / `7PQRS`, `8TUV`, `9WXYZ`, `DEL` / `*#(`, `0+`, space, `Next`). KEY1 short selects the current key, KEY2 short moves to the next key, and KEY2 long moves to the previous key. Repeated selects on a phone key cycle through the digit, lowercase letters, and uppercase letters, for example `2`, `a`, `b`, `c`, `A`, `B`, `C`; after 2 seconds without another select the current character is committed. Secret fields temporarily show only the pending character and mask committed characters as `*`, while normal fields keep committed characters visible.
 
 ### Local automation runtime

@@ -4,6 +4,8 @@ Only GPIO11 (`KEY1`) and GPIO12 (`KEY2`) are treated as StickS3 user keys. GPIO3
 
 The current firmware polls the two documented keys, logs their presses, displays per-key press counters on the optional LCD dashboard, and emits normalized automation facts. In the status UI, physical button gestures are first mapped to the global input contract (`STATUS_UI_INPUT_SELECT`, `STATUS_UI_INPUT_NEXT`, `STATUS_UI_INPUT_PREV`, and `STATUS_UI_INPUT_BACK`) before the focused UI layer routes them to the keyboard, Wi-Fi scan list, active menu, or idle callback path. In the menu, KEY1 short selects, KEY2 short moves next, KEY2 double moves previous, KEY2 long goes back, and KEY1 long from the idle status view opens `Main`. Product actions that require more than the two documented keys remain transport/UX decisions.
 
+KEY2 double-click allows up to 500 ms between the two debounced releases. A single click is dispatched after this window expires. The long-press threshold is 600 ms and debounce is 50 ms.
+
 ## Sources
 
 - M5Stack StickS3 product page pin map for KEY1=GPIO11 and KEY2=GPIO12: https://docs.m5stack.com/en/core/StickS3
