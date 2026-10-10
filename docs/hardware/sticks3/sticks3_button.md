@@ -6,6 +6,8 @@ The current firmware polls the two documented keys, logs their presses, displays
 
 KEY2 double-click allows up to 500 ms between the two debounced releases. A single click is dispatched after this window expires. The long-press threshold is 600 ms and debounce is 50 ms.
 
+While a Web UI browser approval request is pending, its LCD prompt owns focus over the keyboard, scan list and menu: KEY1 short approves the displayed request, while KEY2 single/double/long rejects it. KEY1 long is ignored while this prompt is visible. After approval, rejection, cancellation or the 60-second timeout, the prior screen resumes. The existing input task checks for requests every 250 ms; GPIO polling never waits on the web/runtime mutex. No hardware pin or debounce timing changes are required.
+
 ## Sources
 
 - M5Stack StickS3 product page pin map for KEY1=GPIO11 and KEY2=GPIO12: https://docs.m5stack.com/en/core/StickS3

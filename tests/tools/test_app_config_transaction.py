@@ -49,8 +49,7 @@ int main(void)
     rule_web_t web;
     ASSERT_TRUE(rule_web_start(&web, &s_rule_runtime, &s_rule_store));
     char response[32768];
-    ASSERT_TRUE(rule_web_handle_request(&web, RULE_WEB_METHOD_POST, "/api/config",
-        "{\"source\":\"sound.rms_dbfs\",\"action\":\"http_post\",\"name\":\"browser rename\"}", response, sizeof(response)));
+    ASSERT_TRUE(edit_first_rule(&web, "{\"source\":\"sound.rms_dbfs\",\"name\":\"browser rename\",\"actions\":[{\"action\":\"http_post\"}]}", response, sizeof(response)));
     ASSERT_TRUE(strstr(response, "error") == NULL);
     ASSERT_TRUE(s_rule_runtime.engine.config.rules[0].enabled);
     /* A stale LCD slot changes only its chosen field in the latest config. */

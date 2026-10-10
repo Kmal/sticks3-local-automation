@@ -25,6 +25,8 @@ typedef struct {
     /* Called when the Web UI service flag changes so the owner can start or
      * stop heavyweight server resources outside the status UI module. */
     void (*service_enabled_changed)(bool enabled, void *ctx);
+    uint32_t (*web_auth_pending)(void *ctx);
+    void (*web_auth_decide)(uint32_t request_id, bool approve, void *ctx);
     void *ctx;
 } status_ui_button_handlers_t;
 
@@ -36,7 +38,6 @@ typedef enum {
 } status_ui_input_t;
 
 esp_err_t status_ui_init(const status_ui_button_handlers_t *handlers);
-void status_ui_set_web_access_code(const char *code);
 void status_ui_set_state(status_ui_state_t state);
 status_ui_state_t status_ui_get_state(void);
 const char *status_ui_state_name(status_ui_state_t state);

@@ -19,6 +19,7 @@ python3 "${ROOT}/webui/build_webui.py" --check
 python3 "${ROOT}/tools/check_web_ui_budget.py"
 python3 "${ROOT}/tests/tools/test_build_webui.py"
 node "${ROOT}/tests/web/test_webui.js"
+python3 "${ROOT}/tests/tools/test_web_auth_input.py"
 python3 "${ROOT}/tests/tools/test_app_runtime_startup.py"
 python3 "${ROOT}/tests/tools/test_app_config_transaction.py"
 compile() {

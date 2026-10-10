@@ -1,5 +1,12 @@
 #include "status_ui_input_map.h"
 
+bool status_ui_web_auth_decision(status_ui_input_t input, bool *approve)
+{
+    if (approve == NULL || input < STATUS_UI_INPUT_SELECT || input > STATUS_UI_INPUT_BACK) return false;
+    *approve = input == STATUS_UI_INPUT_SELECT;
+    return true;
+}
+
 bool status_ui_input_from_physical_gesture(status_ui_physical_gesture_t gesture,
                                            status_ui_input_t *out_input)
 {

@@ -88,7 +88,7 @@ typedef struct {
     ui_automation_state_t automations[UI_AUTOMATION_VISIBLE_COUNT];
     ui_status_bar_state_t status_bar;
     ui_toast_t toast;
-    char web_access_code[17];
+    uint32_t web_auth_request_id;
     bool menu_active;
     bool dirty;
 } ui_runtime_t;

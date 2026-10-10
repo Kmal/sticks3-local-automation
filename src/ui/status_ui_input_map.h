@@ -18,6 +18,8 @@ typedef enum {
 
 bool status_ui_input_from_physical_gesture(status_ui_physical_gesture_t gesture,
                                            status_ui_input_t *out_input);
+/* Used only while a device approval prompt owns focus. */
+bool status_ui_web_auth_decision(status_ui_input_t input, bool *approve);
 
 #ifdef __cplusplus
 }

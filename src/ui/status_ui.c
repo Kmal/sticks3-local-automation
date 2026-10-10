@@ -66,6 +66,7 @@ static bool s_service_enabled = false;
 static uint32_t s_key1_press_count = 0;
 static uint32_t s_key2_press_count = 0;
 static ui_runtime_t s_ui;
+static uint32_t s_web_auth_displayed_id;
 static portMUX_TYPE s_state_mux = portMUX_INITIALIZER_UNLOCKED;
 
 typedef struct {
@@ -76,6 +77,8 @@ typedef struct {
     bool disable_web_ui_service;
     bool call_idle_key1;
     bool call_idle_key2;
+    uint32_t web_auth_id;
+    bool web_auth_approve;
 } status_ui_input_effects_t;
 
 static bool status_ui_idle_consume_input_to_effects(status_ui_input_t input, status_ui_input_effects_t *effects);
@@ -146,10 +149,16 @@ const char *status_ui_state_name(status_ui_state_t state)
     }
 }
 
-void status_ui_set_web_access_code(const char *code)
+static void status_ui_sync_web_auth(void)
 {
-    snprintf(s_ui.web_access_code, sizeof(s_ui.web_access_code), "%s", code != NULL ? code : "");
-    s_ui.dirty = true;
+    uint32_t id = status_ui_get_service_enabled() && s_handlers.web_auth_pending != NULL ?
+        s_handlers.web_auth_pending(s_handlers.ctx) : 0;
+    portENTER_CRITICAL(&s_state_mux);
+    if (s_ui.web_auth_request_id != id) {
+        s_ui.web_auth_request_id = id;
+        s_ui.dirty = true;
+    }
+    portEXIT_CRITICAL(&s_state_mux);
 }
 
 void status_ui_set_state(status_ui_state_t state)
@@ -182,6 +191,7 @@ void status_ui_set_service_enabled(bool enabled)
     portENTER_CRITICAL(&s_state_mux);
     changed = s_service_enabled != enabled;
     s_service_enabled = enabled;
+    if (!enabled) { s_ui.web_auth_request_id = 0; s_web_auth_displayed_id = 0; }
     s_ui.dirty = true;
     portEXIT_CRITICAL(&s_state_mux);
     ESP_LOGI(TAG, "web UI service: %s", bool_label(enabled));
@@ -644,6 +654,15 @@ static void status_ui_apply_input_effects(const status_ui_input_effects_t *effec
         return;
     }
 
+    if (effects->web_auth_id != 0) {
+        /* Never call the owner (rule mutex) while holding the UI spinlock. The
+         * request ID binds a delayed button event to the displayed request. */
+        if (s_handlers.web_auth_decide != NULL)
+            s_handlers.web_auth_decide(effects->web_auth_id, effects->web_auth_approve, s_handlers.ctx);
+        status_ui_sync_web_auth();
+        return;
+    }
+
 #if CONFIG_APP_STATUS_UI_LCD
     if (effects->disable_web_ui_service) {
         status_ui_set_service_enabled(false);
@@ -688,6 +707,16 @@ static void status_ui_dispatch_focused_input(status_ui_input_t input,
 void status_ui_handle_input(status_ui_input_t input)
 {
     status_ui_input_effects_t effects = {0};
+
+    portENTER_CRITICAL(&s_state_mux);
+    effects.web_auth_id = s_web_auth_displayed_id;
+    const bool auth_active = s_ui.web_auth_request_id != 0 || s_web_auth_displayed_id != 0;
+    portEXIT_CRITICAL(&s_state_mux);
+    if (auth_active) {
+        if (effects.web_auth_id != 0 && status_ui_web_auth_decision(input, &effects.web_auth_approve))
+            status_ui_apply_input_effects(&effects);
+        return; /* Approval prompts take focus over menus, scans and keyboards. */
+    }
 
 #if CONFIG_APP_STATUS_UI_LCD
     status_ui_dispatch_focused_input(input, &effects);
@@ -775,6 +804,10 @@ static void status_ui_queue_global_input(status_ui_input_t input)
 static void status_ui_handle_key1_long(void)
 {
     portENTER_CRITICAL(&s_state_mux);
+    if (s_ui.web_auth_request_id != 0 || s_web_auth_displayed_id != 0) {
+        portEXIT_CRITICAL(&s_state_mux);
+        return;
+    }
     if (!s_ui.menu_active) {
         s_ui.menu_active = true;
         ui_nav_init(&s_ui.nav);
@@ -989,7 +1022,8 @@ static void status_ui_input_task(void *arg)
     (void)arg;
     while (true) {
         status_ui_input_t input;
-        if (xQueueReceive(s_input_queue, &input, portMAX_DELAY) == pdTRUE) {
+        status_ui_sync_web_auth();
+        if (xQueueReceive(s_input_queue, &input, pdMS_TO_TICKS(250)) == pdTRUE) {
             status_ui_handle_input(input);
         }
     }
@@ -1393,13 +1427,22 @@ static void status_ui_render_menu_lcd(ui_runtime_t *ui)
         }
     }
     ui_render_screen(ui, ui_nav_current(&ui->nav));
-    ui_render_toast(&ui->toast);
+    if (ui->web_auth_request_id == 0) ui_render_toast(&ui->toast);
 }
 
 static void status_ui_render_lcd(void *ctx)
 {
     (void)ctx;
     status_ui_render_menu_lcd(&s_ui);
+    portENTER_CRITICAL(&s_state_mux);
+    uint32_t request_id = s_ui.web_auth_request_id;
+    portEXIT_CRITICAL(&s_state_mux);
+    if (request_id != 0) ui_render_web_auth_popup(request_id);
+    portENTER_CRITICAL(&s_state_mux);
+    /* Only an actually rendered request can receive a physical approval. */
+    s_web_auth_displayed_id = s_service_enabled && s_ui.web_auth_request_id == request_id ? request_id : 0;
+    portEXIT_CRITICAL(&s_state_mux);
+    if (request_id != 0) return;
     if (keyboard_is_active()) {
         status_ui_render_keyboard_lcd();
     }
