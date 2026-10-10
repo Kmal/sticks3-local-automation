@@ -38,7 +38,8 @@
 #if CONFIG_APP_STATUS_UI_LCD
 #define STATUS_UI_INPUT_TASK_STACK 6144
 #define STATUS_UI_INPUT_TASK_PRIORITY 4
-#define STATUS_UI_BUTTON_DOUBLE_MS 250
+/* Allow a relaxed KEY2 double-click; single-click dispatch waits for this window. */
+#define STATUS_UI_BUTTON_DOUBLE_MS 500
 #define STATUS_UI_BUTTON_LONG_MS 600
 /* Match Bruce StickS3 two-button navigation: KEY1 selects, KEY2 single-clicks next,
  * double-clicks previous, and long-presses back/escape. */
