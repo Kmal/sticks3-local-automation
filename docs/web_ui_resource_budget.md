@@ -48,10 +48,10 @@ Measured by `webui/build_webui.py --check`, `tools/check_web_ui_budget.py`, and 
 
 | Measurement | Current value | Budget status |
 | --- | ---: | --- |
-| Firmware gzip `webui_index_html` payload | 9,917 bytes | Above 8 KiB target, within 16 KiB ceiling; 37.4% smaller than the prior 15,855-byte page |
-| Decoded HTML / host fixture | 32,754 bytes | Under existing 32 KiB host response cap |
+| Firmware gzip `webui_index_html` payload | 9,905 bytes | Above 8 KiB target, within 16 KiB ceiling; 37.5% smaller than the prior 15,855-byte page |
+| Decoded HTML / host fixture | 32,738 bytes | Under existing 32 KiB host response cap |
 | Minified HTML shell source, excluding injected CSS/JS | 8,144 bytes | Under 8 KiB hard ceiling |
-| CSS source before minification | 8,520 bytes | Under 12 KiB hard ceiling |
+| CSS source before minification | 8,504 bytes | Under 12 KiB hard ceiling |
 | JavaScript source before minification | 16,409 bytes | Under 25 KiB hard ceiling |
 | URI handlers added for UI assets | 0 | Preserves existing 17-handler table |
 
